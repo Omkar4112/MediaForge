@@ -1,0 +1,37 @@
+# Dependencies
+node_modules/
+__pycache__/
+*.pyc
+.venv/
+venv/
+
+# Build output
+backend/dist/
+
+# Env files
+.env
+*.env.local
+
+# Uploaded files (local dev storage)
+storage/uploads/*
+!storage/uploads/.gitkeep
+
+# Logs
+*.log
+npm-debug.log*
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+
+# Test/coverage
+coverage/
+.pytest_cache/
+.jest-cache/
+
+# Docker
+*.pid

@@ -1,0 +1,125 @@
+version: "3.9"
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: mediaforge-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-mediaforge}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-mediaforge}
+      POSTGRES_DB: ${POSTGRES_DB:-mediaforge_media}
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-mediaforge}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    container_name: mediaforge-redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  analyzer:
+    build:
+      context: ./analyzer
+    container_name: mediaforge-analyzer
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 15s
+
+  backend:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    container_name: mediaforge-backend
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      analyzer:
+        condition: service_healthy
+    environment:
+      NODE_ENV: production
+      PORT: 3000
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: 5432
+      POSTGRES_USER: ${POSTGRES_USER:-gogig}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-gogig}
+      POSTGRES_DB: ${POSTGRES_DB:-gogig_media}
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      ANALYZER_BASE_URL: http://analyzer:8000
+      ANALYZER_TIMEOUT_MS: 60000
+      STORAGE_UPLOAD_DIR: /app/storage/uploads
+      MAX_FILE_SIZE_BYTES: ${MAX_FILE_SIZE_BYTES:-10485760}
+      ALLOWED_MIME_TYPES: ${ALLOWED_MIME_TYPES:-image/jpeg,image/png,image/webp}
+      QUEUE_NAME: image-processing
+      QUEUE_CONCURRENCY: 2
+      QUEUE_MAX_ATTEMPTS: 3
+      DUPLICATE_HAMMING_THRESHOLD: 8
+      MIGRATIONS_DIR: /app/database/migrations
+    ports:
+      - "3000:3000"
+    volumes:
+      - uploads_data:/app/storage/uploads
+    command: >
+      sh -c "node dist/config/migrate.js && node dist/server.js"
+
+  worker:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    container_name: mediaforge-worker
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      analyzer:
+        condition: service_healthy
+      backend:
+        condition: service_started
+    environment:
+      NODE_ENV: production
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: 5432
+      POSTGRES_USER: ${POSTGRES_USER:-gogig}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-gogig}
+      POSTGRES_DB: ${POSTGRES_DB:-gogig_media}
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      ANALYZER_BASE_URL: http://analyzer:8000
+      ANALYZER_TIMEOUT_MS: 60000
+      STORAGE_UPLOAD_DIR: /app/storage/uploads
+      QUEUE_NAME: image-processing
+      QUEUE_CONCURRENCY: 2
+      QUEUE_MAX_ATTEMPTS: 3
+      DUPLICATE_HAMMING_THRESHOLD: 8
+    volumes:
+      - uploads_data:/app/storage/uploads
+    command: ["node", "dist/workers/imageProcessing.worker.js"]
+
+volumes:
+  postgres_data:
+  uploads_data:
