@@ -21,7 +21,10 @@ export async function checkDbConnection(): Promise<boolean> {
     await pool.query('SELECT 1');
     return true;
   } catch (err) {
-    logger.error('Database connection check failed', { error: (err as Error).message });
+    console.error('Database connection check failed:', err);
+    logger.error('Database connection check failed', {
+      error: (err as Error).message,
+    });
     return false;
   }
 }
