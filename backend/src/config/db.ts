@@ -3,7 +3,11 @@ import { env } from './env';
 import { logger } from '../utils/logger';
 
 const useSsl = process.env.POSTGRES_SSL === 'true' || 
-                (process.env.NODE_ENV === 'production' && process.env.POSTGRES_SSL !== 'false');
+                (process.env.NODE_ENV === 'production' && 
+                 process.env.POSTGRES_SSL !== 'false' &&
+                 env.postgres.host !== 'postgres' &&
+                 env.postgres.host !== 'localhost' &&
+                 env.postgres.host !== '127.0.0.1');
 
 export const pool = new Pool({
   host: env.postgres.host,

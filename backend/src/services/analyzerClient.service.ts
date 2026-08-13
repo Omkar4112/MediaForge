@@ -43,47 +43,76 @@ export async function analyzeImage(
   });
 
   const fileBuffer = fs.readFileSync(absoluteFilePath);
-  const form = new FormData();
-  form.append('file', fileBuffer, {
-    filename: path.basename(absoluteFilePath),
-    contentType: mimeType,
-  });
-  if (imageType) {
-    form.append('image_type', imageType);
+  const maxAttempts = 10;
+  const delayMs = 5000;
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    try {
+      const form = new FormData();
+      form.append('file', fileBuffer, {
+        filename: path.basename(absoluteFilePath),
+        contentType: mimeType,
+      });
+      if (imageType) {
+        form.append('image_type', imageType);
+      }
+
+      const contentLength = form.getLengthSync();
+      const headers = {
+        ...form.getHeaders(),
+        'Content-Length': contentLength,
+      };
+
+      const response = await client.post<AnalyzerResponse>('/analyze', form, {
+        headers,
+        maxContentLength: Infinity,
+        maxBodyLength: Infinity,
+      });
+
+      logger.info('Received response from analyzer', {
+        url,
+        status: response.status,
+        statusText: response.statusText,
+        data: response.data,
+      });
+
+      return response.data;
+    } catch (err: any) {
+      const status = err.response?.status;
+      const code = err.code;
+      const isTransient = 
+        !err.response || 
+        status === 502 || 
+        status === 503 || 
+        status === 504 ||
+        code === 'ECONNREFUSED' ||
+        code === 'ETIMEDOUT' ||
+        code === 'ENOTFOUND' ||
+        code === 'ECONNRESET' ||
+        err.message?.toLowerCase().includes('timeout');
+
+      if (isTransient && attempt < maxAttempts) {
+        logger.warn(`Analyzer request failed (attempt ${attempt}/${maxAttempts}). Analyzer may be waking up. Retrying in ${delayMs / 1000}s...`, {
+          error: err.message,
+          code,
+          status,
+        });
+        await new Promise((resolve) => setTimeout(resolve, delayMs));
+        continue;
+      }
+
+      const errorDetails = {
+        url,
+        message: err.message,
+        status,
+        statusText: err.response?.statusText,
+        responseData: err.response?.data,
+      };
+      logger.error('Analyzer request failed permanently', errorDetails);
+      throw err;
+    }
   }
-
-  const contentLength = form.getLengthSync();
-  const headers = {
-    ...form.getHeaders(),
-    'Content-Length': contentLength,
-  };
-
-  try {
-    const response = await client.post<AnalyzerResponse>('/analyze', form, {
-      headers,
-      maxContentLength: Infinity,
-      maxBodyLength: Infinity,
-    });
-
-    logger.info('Received response from analyzer', {
-      url,
-      status: response.status,
-      statusText: response.statusText,
-      data: response.data,
-    });
-
-    return response.data;
-  } catch (err: any) {
-    const errorDetails = {
-      url,
-      message: err.message,
-      status: err.response?.status,
-      statusText: err.response?.statusText,
-      responseData: err.response?.data,
-    };
-    logger.error('Analyzer request failed', errorDetails);
-    throw err;
-  }
+  throw new Error('Analyzer request failed after maximum retry attempts');
 }
 
 

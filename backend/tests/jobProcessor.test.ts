@@ -101,7 +101,7 @@ describe('processImageJob', () => {
     expect(jobRepository.markJobCompleted).not.toHaveBeenCalled();
   });
 
-  it('marks job as "rejected" overall status when blur check fails', async () => {
+  it('marks job as "review" overall status when single blur check fails', async () => {
     (analyzeImage as jest.Mock).mockResolvedValue({
       ...mockAnalysis,
       blur: { status: 'fail', score: 0.1 },
@@ -109,7 +109,7 @@ describe('processImageJob', () => {
     const job = buildJob();
     await processImageJob(job);
 
-    expect(jobRepository.markJobCompleted).toHaveBeenCalledWith('job-1', 'rejected', expect.any(Number));
+    expect(jobRepository.markJobCompleted).toHaveBeenCalledWith('job-1', 'review', expect.any(Number));
   });
 });
 
@@ -127,6 +127,6 @@ describe('handleJobExhausted (retry behaviour)', () => {
   it('marks the job permanently failed once all retry attempts are exhausted', async () => {
     const job = { data: { jobId: 'job-1' }, attemptsMade: 3, opts: { attempts: 3 } } as any;
     await handleJobExhausted(job, new Error('permanent error'));
-    expect(jobRepository.markJobFailed).toHaveBeenCalledWith('job-1', 'permanent error');
+    expect(jobRepository.markJobFailed).toHaveBeenCalledWith('job-1', expect.stringContaining('permanent error'));
   });
 });

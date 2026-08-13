@@ -24,12 +24,12 @@ describe('computeVerdict', () => {
     expect(overallStatus).toBe('review');
   });
 
-  it('returns "rejected" when two or more hard-fail checks fail', () => {
+  it('returns "review" when two or more hard-fail checks fail', () => {
     const { overallStatus } = computeVerdict([
       { checkType: 'blur', status: 'fail', score: 0.1 },
       { checkType: 'brightness', status: 'fail', score: 0.1 },
     ]);
-    expect(overallStatus).toBe('rejected');
+    expect(overallStatus).toBe('review');
   });
 
   it('returns "review" when duplicate is flagged but no hard fail', () => {

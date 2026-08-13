@@ -14,11 +14,18 @@ WARNING_THRESHOLD = 120.0  # below this: soft/blurry, may still be usable
 
 
 def detect_blur(gray_image: np.ndarray) -> dict:
-    laplacian_variance = float(cv2.Laplacian(gray_image, cv2.CV_64F).var())
+    laplacian = cv2.Laplacian(gray_image, cv2.CV_64F)
+    laplacian_variance = float(laplacian.var())
+    max_abs_laplacian = float(np.max(np.abs(laplacian))) if laplacian.size > 0 else 0.0
 
     if laplacian_variance < FAIL_THRESHOLD:
-        status = "fail"
-        message = f"Image is too blurry to be usable (variance: {laplacian_variance:.1f})"
+        # If variance is low but there are very sharp edges, classify as warning instead of fail
+        if max_abs_laplacian > 150.0:
+            status = "warning"
+            message = f"Image has low edge density but sharp details (variance: {laplacian_variance:.1f})"
+        else:
+            status = "fail"
+            message = f"Image is too blurry to be usable (variance: {laplacian_variance:.1f})"
     elif laplacian_variance < WARNING_THRESHOLD:
         status = "warning"
         message = f"Image is slightly blurry (variance: {laplacian_variance:.1f})"

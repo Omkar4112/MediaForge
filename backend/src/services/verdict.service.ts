@@ -64,18 +64,15 @@ export function computeVerdict(checks: CheckSummary[]): { overallStatus: Overall
 
   // Determine verdict from confidence thresholds + hard-fail guard-rails
   let overallStatus: OverallStatus;
-  if (hardFailCount >= 2) {
-    // Two or more technical failures → image too degraded to salvage
-    overallStatus = 'rejected';
-  } else if (hardFailCount === 1) {
-    // Single hard-fail → cap at 'review', may still be useful after human inspection
-    overallStatus = confidence >= 0.35 ? 'review' : 'rejected';
+  if (hardFailCount >= 1) {
+    // Technical failure -> review (never rejected)
+    overallStatus = 'review';
   } else if (hasReviewSignal) {
     // No hard fails, but heuristic warnings → review
-    overallStatus = confidence >= 0.65 ? 'review' : (confidence >= 0.35 ? 'review' : 'rejected');
+    overallStatus = 'review';
   } else {
     // Everything passes
-    overallStatus = confidence >= 0.65 ? 'usable' : (confidence >= 0.35 ? 'review' : 'rejected');
+    overallStatus = confidence >= 0.65 ? 'usable' : 'review';
   }
 
   return { overallStatus, confidence: Number(confidence.toFixed(3)) };
