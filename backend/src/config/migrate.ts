@@ -24,7 +24,7 @@ async function getAppliedMigrations(): Promise<Set<string>> {
   return new Set(result.rows.map((r) => r.filename));
 }
 
-async function runMigrations(): Promise<void> {
+export async function runMigrations(): Promise<void> {
   await ensureMigrationsTable();
   const applied = await getAppliedMigrations();
 
@@ -58,9 +58,11 @@ async function runMigrations(): Promise<void> {
   logger.info('All migrations applied.');
 }
 
-runMigrations()
-  .then(() => process.exit(0))
-  .catch((err) => {
-    logger.error('Migration run failed', { error: err.message });
-    process.exit(1);
-  });
+if (require.main === module) {
+  runMigrations()
+    .then(() => process.exit(0))
+    .catch((err) => {
+      logger.error('Migration run failed', { error: err.message });
+      process.exit(1);
+    });
+}

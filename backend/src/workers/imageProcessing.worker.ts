@@ -21,10 +21,10 @@ worker.on('completed', (job) => {
 });
 
 worker.on('failed', async (job, err) => {
-  logger.error('Job failed', { jobId: job?.id, error: err.message, attemptsMade: job?.attemptsMade });
+  logger.error('Job failed', { jobId: job?.id, error: err.message, stack: err.stack, attemptsMade: job?.attemptsMade });
   if (job) {
     await handleJobExhausted(job, err).catch((e) =>
-      logger.error('Failed to persist job failure', { error: (e as Error).message })
+      logger.error('Failed to persist job failure', { error: (e as Error).message, stack: (e as Error).stack })
     );
   }
 });
