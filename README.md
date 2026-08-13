@@ -59,7 +59,23 @@ Status / Results API
 
 The upload and analysis pipeline operates asynchronously. The API accepts the uploaded image, stores it, creates a processing job, and immediately returns a processing ID while the worker processes the image in the background. The job status and final results are then retrieved via polling endpoints.
 
-## 3. Processing Flow
+## 3. Deployment
+
+The project is deployed across managed cloud services:
+
+- Frontend: https://media-forge-taupe.vercel.app/
+- Backend API: https://mediaforge-backend-c399.onrender.com
+- Analyzer: https://mediaforge-analyzer.onrender.com
+- Database: Neon PostgreSQL
+
+The frontend is hosted on Vercel, the Node.js backend and Python analyzer run on Render, and the PostgreSQL database is connected through Neon with SSL enabled for production.
+
+Live health checks:
+- Frontend: https://media-forge-taupe.vercel.app/
+- Backend health: https://mediaforge-backend-c399.onrender.com/health
+- Analyzer health: https://mediaforge-analyzer.onrender.com/health
+
+## 4. Processing Flow
 
 ```text
 Upload
@@ -93,7 +109,7 @@ Failure and retry flow:
 - If the final attempt fails, the job is marked as `failed` and the error reason is persisted.
 - A missing stored file or analyzer failure can leave the job in a failed terminal state rather than a stuck processing state.
 
-## 4. Tech Stack
+## 5. Tech Stack
 
 The project uses the following technologies, all of which exist in the implementation:
 
@@ -112,7 +128,7 @@ The project uses the following technologies, all of which exist in the implement
 - Jest and Supertest
 - Pytest
 
-## 5. Image Analysis
+## 6. Image Analysis
 
 The analyzer performs a set of heuristic checks. These are useful triage signals, but they are probabilistic and heuristic by design. They should not be treated as definitive forensic truth.
 
@@ -129,7 +145,7 @@ Important: every heuristic result is probabilistic. A warning or fail result ind
 
 The number-plate check is limited to validation of registration-number format. It does not prove that the plate belongs to the vehicle, that ownership is valid, or that the image is authentic.
 
-## 6. Generic Image Support
+## 7. Generic Image Support
 
 This project is built for generic campaign evidence, not only vehicle images.
 
@@ -153,7 +169,7 @@ Example:
 
 This behavior is implemented in the analyzer service, which only calls plate detection when `image_type == "vehicle"`.
 
-## 7. API Documentation
+## 8. API Documentation
 
 The project exposes a small asynchronous image-processing API through the Node.js backend.
 

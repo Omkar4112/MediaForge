@@ -57,6 +57,8 @@ function App() {
   const [isDragActive, setIsDragActive] = useState<boolean>(false);
   const [isUploading, setIsUploading] = useState<boolean>(false);
   const [error, setError] = useState<string | null>(null);
+  const [serverCheckState, setServerCheckState] = useState<'idle' | 'starting' | 'ready' | 'timeout'>('idle');
+  const [startupElapsed, setStartupElapsed] = useState<number>(0);
   
   // Job Tracking
   const [processingId, setProcessingId] = useState<string | null>(null);
@@ -68,6 +70,14 @@ function App() {
 
   const fileInputRef = useRef<HTMLInputElement>(null);
 
+  const getApiBase = () => (import.meta.env.VITE_API_URL || '').replace(/\/+$/, '');
+
+  const getApiUrl = (path: string) => {
+    const normalizedPath = path.startsWith('/') ? path : `/${path}`;
+    const base = getApiBase();
+    return base ? `${base}${normalizedPath}` : normalizedPath;
+  };
+
   // Poll status when processingId is active
   useEffect(() => {
     if (!processingId) return;
@@ -75,7 +85,7 @@ function App() {
     let timer: number;
     const pollStatus = async () => {
       try {
-        const response = await fetch(`/api/v1/images/${processingId}/status`);
+        const response = await fetch(getApiUrl(`/api/v1/images/${processingId}/status`));
         if (!response.ok) {
           throw new Error('Failed to fetch job status');
         }
@@ -106,7 +116,7 @@ function App() {
 
   const fetchResults = async (id: string) => {
     try {
-      const response = await fetch(`/api/v1/images/${id}/results`);
+      const response = await fetch(getApiUrl(`/api/v1/images/${id}/results`));
       if (!response.ok) {
         throw new Error('Failed to fetch image results');
       }
@@ -114,6 +124,88 @@ function App() {
       setResults(data);
     } catch (err: any) {
       setError(err.message || 'Error loading validation results');
+    }
+  };
+
+  const waitForBackendToWakeUp = async (): Promise<boolean> => {
+    const healthUrl = getApiUrl('/health');
+    const startedAt = Date.now();
+    setServerCheckState('starting');
+    setStartupElapsed(0);
+
+    const intervalId = window.setInterval(() => {
+      setStartupElapsed(Math.floor((Date.now() - startedAt) / 1000));
+    }, 1000);
+
+    try {
+      while (true) {
+        try {
+          const controller = new AbortController();
+          const timeoutId = window.setTimeout(() => controller.abort(), 10000);
+          const response = await fetch(healthUrl, {
+            method: 'GET',
+            signal: controller.signal,
+            headers: {
+              Accept: 'application/json',
+            },
+          });
+          window.clearTimeout(timeoutId);
+
+          if (response.ok) {
+            setServerCheckState('ready');
+            setStartupElapsed(0);
+            return true;
+          }
+        } catch (_err) {
+          // Ignore transient wake-up failures and continue polling.
+        }
+
+        const elapsedSeconds = Math.floor((Date.now() - startedAt) / 1000);
+        setStartupElapsed(elapsedSeconds);
+
+        if (elapsedSeconds >= 90) {
+          setServerCheckState('timeout');
+          return false;
+        }
+
+        await new Promise((resolve) => window.setTimeout(resolve, 2000));
+      }
+    } finally {
+      window.clearInterval(intervalId);
+    }
+  };
+
+  const uploadImage = async (selectedFile: File, selectedImageType: string) => {
+    const formData = new FormData();
+    formData.append('image', selectedFile);
+    formData.append('imageType', selectedImageType);
+
+    try {
+      setIsUploading(true);
+      setError(null);
+      setResults(null);
+      setJobError(null);
+      setJobStatus(null);
+      setProcessingId(null);
+
+      const response = await fetch(getApiUrl('/api/v1/images'), {
+        method: 'POST',
+        body: formData,
+      });
+
+      if (!response.ok) {
+        const errData = await response.json().catch(() => ({}));
+        throw new Error(errData.error || 'Failed to upload image');
+      }
+
+      const data = await response.json();
+      setProcessingId(data.processingId);
+      setJobStatus('pending');
+      setServerCheckState('ready');
+    } catch (err: any) {
+      setError(err.message || 'Error occurred during image upload');
+    } finally {
+      setIsUploading(false);
     }
   };
 
@@ -174,36 +266,26 @@ function App() {
     e.preventDefault();
     if (!file) return;
 
-    setIsUploading(true);
     setError(null);
     setResults(null);
     setJobError(null);
     setJobStatus(null);
     setProcessingId(null);
 
-    const formData = new FormData();
-    formData.append('image', file);
-    formData.append('imageType', imageType);
-
-    try {
-      const response = await fetch('/api/v1/images', {
-        method: 'POST',
-        body: formData,
-      });
-
-      if (!response.ok) {
-        const errData = await response.json().catch(() => ({}));
-        throw new Error(errData.error || 'Failed to upload image');
-      }
-
-      const data = await response.json();
-      setProcessingId(data.processingId);
-      setJobStatus('pending');
-    } catch (err: any) {
-      setError(err.message || 'Error occurred during image upload');
-    } finally {
+    const backendReady = await waitForBackendToWakeUp();
+    if (!backendReady) {
       setIsUploading(false);
+      return;
     }
+
+    await uploadImage(file, imageType);
+  };
+
+  const retryUpload = () => {
+    if (!file) return;
+    setError(null);
+    setServerCheckState('idle');
+    void handleUploadSubmit({ preventDefault: () => undefined } as React.FormEvent);
   };
 
   const resetForm = () => {
@@ -342,6 +424,34 @@ function App() {
               )}
             </div>
 
+            {(serverCheckState === 'starting' || serverCheckState === 'ready' || serverCheckState === 'timeout') && (
+              <div style={{ marginBottom: '16px', padding: '10px 12px', borderRadius: '10px', border: '1px solid var(--border-color)', background: serverCheckState === 'timeout' ? 'rgba(239,68,68,0.08)' : serverCheckState === 'ready' ? 'rgba(34,197,94,0.08)' : 'rgba(245,158,11,0.08)', color: serverCheckState === 'timeout' ? 'var(--accent-red)' : serverCheckState === 'ready' ? 'var(--accent-green)' : 'var(--accent-amber)' }}>
+                {serverCheckState === 'starting' && (
+                  <>
+                    <div style={{ fontWeight: 600 }}>🟡 Starting verification server...</div>
+                    <div style={{ marginTop: '4px', fontSize: '0.82rem' }}>The server is waking up. This may take up to 60 seconds on the free hosting tier.</div>
+                    <div style={{ marginTop: '6px', fontSize: '0.8rem' }}>Server starting... {startupElapsed}s</div>
+                  </>
+                )}
+                {serverCheckState === 'ready' && (
+                  <div style={{ fontWeight: 600 }}>🟢 Server ready ✓</div>
+                )}
+                {serverCheckState === 'timeout' && (
+                  <>
+                    <div style={{ fontWeight: 600 }}>🔴 Server took too long to start. Please try again.</div>
+                    <button
+                      type="button"
+                      onClick={retryUpload}
+                      className="btn-primary"
+                      style={{ marginTop: '10px', width: '100%' }}
+                    >
+                      Retry verification
+                    </button>
+                  </>
+                )}
+              </div>
+            )}
+
             {error && (
               <div style={{ color: 'var(--accent-red)', fontSize: '0.85rem', marginBottom: '16px', display: 'flex', gap: '8px' }}>
                 <XCircle size={16} style={{ flexShrink: 0 }} /> {error}
@@ -357,7 +467,7 @@ function App() {
                 {isUploading ? (
                   <>
                     <RefreshCw className="spinner" size={20} style={{ animation: 'spin 1s linear infinite' }} />
-                    Uploading...
+                    {serverCheckState === 'starting' ? 'Starting server...' : 'Uploading...'}
                   </>
                 ) : (
                   <>
