@@ -70,7 +70,10 @@ function App() {
 
   const fileInputRef = useRef<HTMLInputElement>(null);
 
-  const getApiBase = () => (import.meta.env.VITE_API_URL || '').replace(/\/+$/, '');
+  const getApiBase = () => {
+    const value = import.meta.env.VITE_API_URL || '';
+    return value.replace(/\/+$/, '');
+  };
 
   const getApiUrl = (path: string) => {
     const normalizedPath = path.startsWith('/') ? path : `/${path}`;
@@ -128,6 +131,13 @@ function App() {
   };
 
   const waitForBackendToWakeUp = async (): Promise<boolean> => {
+    const baseUrl = getApiBase();
+    if (!baseUrl) {
+      setServerCheckState('timeout');
+      setError('VITE_API_URL is not configured. Set the backend URL in Vercel environment variables.');
+      return false;
+    }
+
     const healthUrl = getApiUrl('/health');
     const startedAt = Date.now();
     setServerCheckState('starting');
@@ -165,6 +175,7 @@ function App() {
 
         if (elapsedSeconds >= 90) {
           setServerCheckState('timeout');
+          setError('Server took too long to start. Please try again.');
           return false;
         }
 
@@ -188,10 +199,16 @@ function App() {
       setJobStatus(null);
       setProcessingId(null);
 
+      const controller = new AbortController();
+      const timeoutId = window.setTimeout(() => controller.abort(), 30000);
+
       const response = await fetch(getApiUrl('/api/v1/images'), {
         method: 'POST',
         body: formData,
+        signal: controller.signal,
       });
+
+      window.clearTimeout(timeoutId);
 
       if (!response.ok) {
         const errData = await response.json().catch(() => ({}));
