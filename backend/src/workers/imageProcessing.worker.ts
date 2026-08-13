@@ -5,7 +5,7 @@ import { logger } from '../utils/logger';
 import type { ImageProcessingJobData } from '../queues/imageProcessing.queue';
 import { processImageJob, handleJobExhausted } from './jobProcessor';
 
-const worker = new Worker<ImageProcessingJobData>(
+export const worker = new Worker<ImageProcessingJobData>(
   env.queue.name,
   async (job) => {
     await processImageJob(job);
@@ -47,7 +47,9 @@ function shutdown(signal: string) {
     });
 }
 
-process.on('SIGTERM', () => shutdown('SIGTERM'));
-process.on('SIGINT', () => shutdown('SIGINT'));
+if (process.env.START_WORKER_IN_PROCESS !== 'true') {
+  process.on('SIGTERM', () => shutdown('SIGTERM'));
+  process.on('SIGINT', () => shutdown('SIGINT'));
+}
 
 logger.info(`Image processing worker started (concurrency=${env.queue.concurrency})`);

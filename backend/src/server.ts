@@ -6,13 +6,16 @@ import { logger } from './utils/logger';
 // (node dist/workers/imageProcessing.worker.js). On Render (single-process),
 // set START_WORKER_IN_PROCESS=true so the BullMQ worker runs inside the
 // HTTP-server process.
+let workerModule: any = null;
+
 if (process.env.START_WORKER_IN_PROCESS === 'true') {
   logger.info('START_WORKER_IN_PROCESS=true — starting BullMQ worker in-process');
-  const isTs = __filename.endsWith('.ts');
-  const workerPath = isTs ? './workers/imageProcessing.worker.ts' : './workers/imageProcessing.worker.js';
-  import(workerPath).catch((err) => {
+  try {
+    // Resolve module path without file extension so node/ts-node-dev handles it correctly in both dev and production.
+    workerModule = require('./workers/imageProcessing.worker');
+  } catch (err) {
     logger.error('Failed to start in-process worker', { error: (err as Error).message });
-  });
+  }
 } else {
   logger.info('START_WORKER_IN_PROCESS is not set — worker will NOT run in this process');
 }
@@ -24,11 +27,31 @@ const server = app.listen(env.port, () => {
 });
 
 function shutdown(signal: string) {
-  logger.info(`Received ${signal}. Shutting down HTTP server gracefully.`);
-  server.close(() => {
-    logger.info('HTTP server closed.');
-    process.exit(0);
+  logger.info(`Received ${signal}. Shutting down gracefully.`);
+
+  const serverClosePromise = new Promise<void>((resolve) => {
+    server.close(() => {
+      logger.info('HTTP server closed.');
+      resolve();
+    });
   });
+
+  const workerClosePromise = workerModule && workerModule.worker
+    ? workerModule.worker.close().then(() => {
+        logger.info('Worker closed.');
+      }).catch((err: any) => {
+        logger.error('Error during worker shutdown', { error: err.message });
+      })
+    : Promise.resolve();
+
+  Promise.all([serverClosePromise, workerClosePromise]).then(() => {
+    logger.info('All services shut down gracefully.');
+    process.exit(0);
+  }).catch((err) => {
+    logger.error('Error during graceful shutdown', { error: err.message });
+    process.exit(1);
+  });
+
   setTimeout(() => {
     logger.warn('Forcing shutdown after timeout.');
     process.exit(1);
@@ -37,3 +60,4 @@ function shutdown(signal: string) {
 
 process.on('SIGTERM', () => shutdown('SIGTERM'));
 process.on('SIGINT', () => shutdown('SIGINT'));
+

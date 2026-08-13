@@ -10,7 +10,6 @@ export function createRedisConnection(): IORedis {
     // single connection URL.  Pass it directly to ioredis.
     return new IORedis(redisUrl, {
       maxRetriesPerRequest: null,
-      enableOfflineQueue: false,
       // Render Redis requires TLS; ioredis auto-enables TLS for rediss:// URLs
       // but some providers use redis:// with separate TLS config.
       ...(redisUrl.startsWith('rediss://') ? { tls: { rejectUnauthorized: false } } : {}),
@@ -22,9 +21,6 @@ export function createRedisConnection(): IORedis {
     host: env.redis.host,
     port: env.redis.port,
     maxRetriesPerRequest: null,
-    lazyConnect: true,
     connectTimeout: 5000,
-    commandTimeout: 5000,
-    enableOfflineQueue: false,
   });
 }
