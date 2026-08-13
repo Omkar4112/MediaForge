@@ -24,7 +24,11 @@ export const imageProcessingQueue = new Queue<ImageProcessingJobData>(env.queue.
 });
 
 export async function enqueueImageProcessingJob(data: ImageProcessingJobData): Promise<void> {
-  // Use the DB job id as the BullMQ job id to make re-enqueueing idempotent
-  // and to protect against duplicate processing of the same logical job.
-  await imageProcessingQueue.add('analyze-image', data, { jobId: data.jobId });
+  try {
+    // Use the DB job id as the BullMQ job id to make re-enqueueing idempotent
+    // and to protect against duplicate processing of the same logical job.
+    await imageProcessingQueue.add('analyze-image', data, { jobId: data.jobId });
+  } catch (err) {
+    throw new Error(`Redis queue unavailable: ${(err as Error).message}`);
+  }
 }

@@ -7,5 +7,9 @@ export function createRedisConnection(): IORedis {
     host: env.redis.host,
     port: env.redis.port,
     maxRetriesPerRequest: null,
+    lazyConnect: true,
+    connectTimeout: 5000,
+    commandTimeout: 5000,
+    enableOfflineQueue: false,
   });
 }

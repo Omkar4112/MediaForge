@@ -200,7 +200,7 @@ function App() {
       setProcessingId(null);
 
       const controller = new AbortController();
-      const timeoutId = window.setTimeout(() => controller.abort(), 30000);
+      const timeoutId = window.setTimeout(() => controller.abort(), 120000);
 
       const response = await fetch(getApiUrl('/api/v1/images'), {
         method: 'POST',
@@ -220,7 +220,11 @@ function App() {
       setJobStatus('pending');
       setServerCheckState('ready');
     } catch (err: any) {
-      setError(err.message || 'Error occurred during image upload');
+      if (err?.name === 'AbortError') {
+        setError('Upload request timed out. The backend is slow or temporarily unavailable. Please try again.');
+      } else {
+        setError(err.message || 'Error occurred during image upload');
+      }
     } finally {
       setIsUploading(false);
     }
