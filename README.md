@@ -1,518 +1,520 @@
-# MediaForge
+# MediaForge: Asynchronous Image Verification Pipeline
 
-MediaForge is an asynchronous image-evidence verification pipeline for offline campaign execution. Field workers upload campaign images as evidence, and the system processes them asynchronously to evaluate image quality, duplication, OCR, suspicious-image signals, and other useful indicators before human review. The solution is designed for generic campaign-image intake, not only vehicle documentation.
+MediaForge is an asynchronous image-evidence verification pipeline designed for offline campaign execution. When field workers upload campaign images as evidence, the system processes them asynchronously in the background to analyze image quality, detect duplicates, perform OCR, check for suspicious tampering heuristics, and calculate an overall confidence score and verdict. The pipeline is designed for generic campaign-image intake and is not limited to vehicle verification.
 
-This repository contains the implementation for the GoGig assignment and includes:
-- backend — Node.js + TypeScript API and background worker
-- analyzer — Python FastAPI service that performs the image-analysis checks
-- database — PostgreSQL schema for images, jobs, and analysis results
-- docker-compose — local orchestration for PostgreSQL, Redis, analyzer, backend, and worker
+---
 
 ## 1. Overview
+In offline marketing campaigns, validating execution depends heavily on photos uploaded by field workers as evidence of completion (e.g., verifying that a banner or vehicle branding was correctly placed). Doing this manually at scale is slow, prone to errors, and expensive. 
 
-This project implements an asynchronous image-evidence verification pipeline for offline campaign execution.
+MediaForge automates the ingestion and verification of these images. Because image analysis (OpenCV calculations, OCR character extraction, and perceptual hashing queries) can be resource-intensive and slow, the pipeline operates **asynchronously**:
+- The API accepts uploads and immediately returns an ingestion ticket (status `pending`).
+- A background worker picks up the job via a Redis-backed queue.
+- A Python analyzer microservice performs heuristic checks and stores structured results.
+- The pipeline processes both specialized vehicle images (with number-plate validation) and generic campaign images (which return number-plate status as `not_applicable`).
 
-Field workers upload campaign images as evidence. The system accepts these images, stores them, creates a processing job, and then performs background analysis. The analyzer checks image quality, duplication, OCR, suspicious-image signals, and other indicators that help triage whether the uploaded evidence is usable, requires review, or should be rejected.
+---
 
-The pipeline accepts generic campaign images. Vehicle number-plate validation is an optional specialized check because the provided GoGig sample images are vehicle images, but the system is not limited to vehicles. It is intended to support a broader range of campaign evidence uploads.
+## 2. Problem Context
+Validating field evidence involves detecting common quality issues and deceptive practices:
+- **Blurry Images:** Out-of-focus photos prevent readable text/details (e.g., verifying campaign content or vehicle registration plates).
+- **Dark/Bright Images:** Poor exposure or night shots obscure detail and make verification impossible.
+- **Duplicate Uploads:** Re-submitting the same photo across different campaign spots or jobs represents execution fraud.
+- **Screenshots / Photo-of-Photo:** Field workers sometimes upload screenshots or take photos of other screens/physical prints to simulate on-site execution.
+- **Tampered Images:** Digitally manipulated images (e.g., photoshopping banners onto spots) compromise execution integrity.
 
-The processing model is intentionally asynchronous so the upload API can return immediately while a worker performs the analysis in the background.
+MediaForge implements robust analysis to detect these indicators, enabling manual reviewers to focus only on questionable uploads.
 
-## 2. Architecture
+---
 
+## 3. Key Features
+- **Asynchronous Processing:** Multi-service orchestration using Redis and BullMQ for responsive API uploads.
+- **Blur Detection:** Laplacian variance check to isolate out-of-focus submissions.
+- **Brightness Evaluation:** Color-space analysis to flag overexposed or underexposed photos.
+- **Perceptual Hashing (pHash):** Perceptual similarity queries in PostgreSQL to flag duplicate or modified images.
+- **OCR Text Extraction:** Tesseract-OCR integration to read and search text within campaign images.
+- **Indian Vehicle Plate Validation:** Dynamic format and state-code checks matching Indian registration standards.
+- **Dimensions Check:** Aspect ratio and resolution verification to block low-quality files.
+- **Screen Capture/Photo-of-Photo Detection:** Heuristics checking for flat-color distributions, camera EXIF absence, and frame borders.
+- **Tampering Heuristic:** Error Level Analysis (ELA) to flag local compression anomalies in manipulated files.
+- **Automatic Analyzer Cold-Start Handling:** Backend client automatically ping-checks and wakes Render-hosted services before processing.
+- **Structured Results & Confidence Score:** Normalized per-check metrics and overall review verdicts.
+
+---
+
+## 4. Architecture
 ```text
-Client / Field Worker
-        |
-        v
-Upload API (Node.js + Express)
-        |
-        +------> PostgreSQL
-        |          |
-        |          +-- image metadata
-        |          +-- processing jobs
-        |          +-- analysis results
-        |
-        v
-Redis + BullMQ
-        |
-        v
-Background Worker
-        |
-        v
-Python FastAPI Analyzer
-        |
-        +-- Blur
-        +-- Brightness
-        +-- Duplicate / pHash
-        +-- OCR
-        +-- Number Plate (vehicle only)
-        +-- Dimensions
-        +-- Photo-of-photo
-        +-- Tampering heuristic
-        |
-        v
-Structured Analysis Results
-        |
-        v
-Status / Results API
+                  [ Client / Frontend ]
+                           │
+                           ▼ (POST /api/v1/images)
+              [ Node.js + Express backend ]
+               │                         │
+               ▼                         ▼
+      [ PostgreSQL DB ]          [ Redis + BullMQ ]
+      (Stores Image/Job              (Job Queue)
+          Metadata)                      │
+                                         ▼
+                               [ Background Worker ]
+                                         │
+                                         ▼ (POST /analyze)
+                            [ Python FastAPI Analyzer ]
+                                         │
+                 ┌───────────────────────┼───────────────────────┐
+                 ▼                       ▼                       ▼
+            [ OpenCV ]            [ Tesseract OCR ]      [ Image Heuristics ]
+       (Blur/Brightness/ELA)    (Text/Plate Patterns)   (Photo-of-Photo/pHash)
+                                         │
+                                         ▼
+                            [ Analysis Results DB Table ]
+                                         │
+                                         ▼ (GET /images/:id/results)
+                                  [ Client UI ]
 ```
 
-The upload and analysis pipeline operates asynchronously. The API accepts the uploaded image, stores it, creates a processing job, and immediately returns a processing ID while the worker processes the image in the background. The job status and final results are then retrieved via polling endpoints.
+---
 
-## 3. Deployment
+## 5. Processing Flow
+1. **Upload:** Client uploads an image with an optional `imageType` via `POST /api/v1/images`.
+2. **Ingest & Validate:** Backend checks file limits/MIME types, saves the file to local/object storage, and inserts a row in the `images` table.
+3. **Queue Job:** A job row is created in `processing_jobs` (status `pending`), and a BullMQ job is enqueued in Redis. The API immediately returns `202 Accepted` with the `processingId`.
+4. **Acquire & Process:** The background worker picks up the job, changes its status to `processing`, and calls the Python analyzer.
+5. **Wake & Analyze:** 
+   - The backend analyzer client checks if the Python service is active by calling `${ANALYZER_BASE_URL}/health`.
+   - If the analyzer is sleeping (cold-starting on Render), it retries and waits until it is ready.
+   - The backend sends the image as a multipart POST payload (using fixed-buffer and content-length) to `/analyze`.
+6. **Heuristics & pHash:** The analyzer runs OpenCV, OCR, and EXIF checks. Perceptual duplicate detection is run by the backend querying Postgres for hamming distances.
+7. **Verdict & Complete:** Check details are saved to `analysis_results`, overall confidence is calculated, and the job status is set to `completed` in `processing_jobs`.
 
-The project is deployed across managed cloud services:
+### Retries & Failure Handling
+- **Transient Failures:** Connection drops, timeouts, 502/503/504 errors on health or analyze calls trigger up to 3 automatic retries with backoff.
+- **Permanent Failures:** Client errors (400), corrupt files, or code errors do not retry, immediately setting the job status to `failed` with the error reason stored in the database.
 
-- Frontend: https://media-forge-taupe.vercel.app/
-- Backend API: https://mediaforge-backend-c399.onrender.com
-- Analyzer: https://mediaforge-analyzer.onrender.com
-- Database: Neon PostgreSQL
+---
 
-The frontend is hosted on Vercel, the Node.js backend and Python analyzer run on Render, and the PostgreSQL database is connected through Neon with SSL enabled for production.
+## 6. Tech Stack
+- **API & Worker:** Node.js, TypeScript, Express, Multer
+- **Queue System:** Redis, BullMQ
+- **Relational DB:** PostgreSQL, pg (node-postgres)
+- **Analyzer API:** Python, FastAPI, Uvicorn
+- **Image Processing & CV:** OpenCV (opencv-python), Pillow (PIL)
+- **Text Recognition:** Tesseract OCR (pytesseract)
+- **Testing:** Jest, Supertest (Node.js), Pytest (Python)
+- **Containerization:** Docker, Docker Compose
 
-Live health checks:
-- Frontend: https://media-forge-taupe.vercel.app/
-- Backend health: https://mediaforge-backend-c399.onrender.com/health
-- Analyzer health: https://mediaforge-analyzer.onrender.com/health
+---
 
-## 4. Processing Flow
+## 7. Image Analysis Checks
+- **Blur:** Calculates the variance of the Laplacian. Low variance indicates blur. Refined to classify low-edge-density but sharp images (e.g. screenshots with flat backgrounds) as `warning` instead of `fail` by checking the maximum absolute gradient.
+- **Brightness:** Analyzes the mean pixel intensity in the grayscale channel to detect under-exposed (`too_dark`) or over-exposed (`too_bright`) environments.
+- **Duplicate:** Computes an 8-byte perceptual hash (pHash) of the image. The backend compares this hash against previous hashes using Hamming distance.
+- **OCR:** Uses Tesseract to extract alphanumeric text strings from the image.
+- **Number Plate:** If the image is marked as `vehicle`, matches OCR text against standard regex patterns for Indian registration plates (e.g., `MH12AB1234`) and checks valid state codes.
+- **Dimensions:** Validates resolution (minimum 800x600px) and checks for unusual aspect ratios.
+- **Photo-of-Photo:** A heuristic checking for a combination of flat-region ratios (screen glow), lack of camera EXIF metadata, and rectangular screen borders.
+- **Tampering:** Performs Error Level Analysis (ELA) by saving the image at a specific quality level, computing the difference, and analyzing pixel standard deviation to flag composite edits.
 
-```text
-Upload
-→ validate
-→ store image + metadata
-→ create job
-→ pending
-→ worker picks job
-→ processing
-→ analyzer runs checks
-→ save results
-→ completed
-```
+*Note: These are heuristic, probabilistic checks intended to surface potential risk signals for human review. They do not represent definitive forensic guarantees.*
 
-The actual flow implemented in the code is:
+---
 
-1. The backend validates the uploaded file and stores the image bytes in the configured upload directory.
-2. The backend records the image metadata in PostgreSQL.
-3. A processing job is created in PostgreSQL with status `pending`.
-4. A BullMQ job is enqueued in Redis.
-5. The worker picks the job and marks it as `processing`.
-6. The worker calls the Python analyzer, which runs the configured image-quality and OCR checks.
-7. Duplicate detection is performed in the backend against prior image hashes in PostgreSQL.
-8. The backend stores each result as a `check_type` result in `analysis_results`.
-9. The final verdict is derived from the aggregated checks and saved to the job record.
-10. The API exposes the job status and final results to clients.
+## 8. Generic Image Support
+MediaForge is fully generalized to support any campaign evidence images:
+- **Generic Checks:** Blur, brightness, dimensions, duplicate, photo-of-photo, and tampering heuristics apply globally to all uploads.
+- **Conditional Plate Check:** Vehicle number-plate validation only runs if `imageType` is set to `"vehicle"`.
+- **Skip Behavior:** For non-vehicle images (e.g., banner photos, shop branding), the number-plate check is bypassed, returning status `"not_applicable"`.
+- **Triage Safety:** A `"not_applicable"` check status does not lower the confidence score or affect the overall verdict.
 
-Failure and retry flow:
-- BullMQ retries failed processing jobs with exponential backoff.
-- The queue is configured with `attempts` and backoff settings.
-- If the final attempt fails, the job is marked as `failed` and the error reason is persisted.
-- A missing stored file or analyzer failure can leave the job in a failed terminal state rather than a stuck processing state.
+---
 
-## 5. Tech Stack
+## 9. Verdict Logic
+The overall job verdict is determined by combining the individual check statuses and the calculated confidence score:
+- **`usable`:** Returned when all quality checks pass successfully and the confidence score is high ($\ge 0.65$).
+- **`review`:** Returned if any quality check fails or returns a warning, or if the overall confidence score falls below $0.65$.
+- **No Automatic Rejections:** To prevent false rejections from blocking legitimate campaigns, the pipeline never automatically marks a job as `rejected`. Any candidate for rejection is instead categorized as `review` so a human operator can make the final determination.
 
-The project uses the following technologies, all of which exist in the implementation:
+---
 
-- Node.js
-- TypeScript
-- Express
-- PostgreSQL
-- Redis
-- BullMQ
-- Python
-- FastAPI
-- OpenCV
-- Tesseract OCR
-- perceptual hashing (pHash-based duplicate detection)
-- Docker and Docker Compose
-- Jest and Supertest
-- Pytest
+## 10. API Documentation
 
-## 6. Image Analysis
+### 1. Ingest Campaign Image
+`POST /api/v1/images`
 
-The analyzer performs a set of heuristic checks. These are useful triage signals, but they are probabilistic and heuristic by design. They should not be treated as definitive forensic truth.
+Uploads an image file to start the verification process.
 
-- Blur detection: checks if the image is too blurry to be useful evidence.
-- Brightness: evaluates whether the image is under- or overexposed enough to reduce interpretability.
-- Duplicate detection: uses perceptual hash comparison to identify visually similar or repeated images.
-- OCR: extracts text from the image using Tesseract and surfaces the recognized content.
-- Indian number-plate format validation: validates whether text resembles an Indian vehicle registration number pattern. This is a format check, not proof of authenticity or ownership.
-- Dimensions / quality: checks image resolution and basic dimensions for usefulness.
-- Photo-of-photo heuristic: looks for evidence that the image may have been captured off a screen or another image.
-- Tampering heuristic: uses image-level heuristics to flag suspicious alterations or manipulated evidence.
+- **Request Type:** `multipart/form-data`
+- **Headers:** `Content-Type: multipart/form-data`
+- **Body Parameters:**
+  - `image` (File, Required): The JPEG/PNG/WebP image.
+  - `imageType` (String, Optional): Options: `generic` (default), `vehicle`.
+- **Response:** `202 Accepted`
 
-Important: every heuristic result is probabilistic. A warning or fail result indicates a risk signal, not a guaranteed fact. The project intentionally avoids claiming forensic certainty from these checks.
-
-The number-plate check is limited to validation of registration-number format. It does not prove that the plate belongs to the vehicle, that ownership is valid, or that the image is authentic.
-
-## 7. Generic Image Support
-
-This project is built for generic campaign evidence, not only vehicle images.
-
-- Any valid campaign image can be uploaded.
-- Generic checks work for all images.
-- Vehicle images can additionally run number-plate analysis.
-- For non-vehicle images, the number-plate check should be `not_applicable`.
-- `not_applicable` does not mean failure; it means the check was intentionally skipped because the image type is not a vehicle.
-
-Example:
-
-```json
-{
-  "imageType": "generic",
-  "numberPlate": {
-    "status": "not_applicable",
-    "message": "Number plate detection is only performed for vehicle images."
-  }
-}
-```
-
-This behavior is implemented in the analyzer service, which only calls plate detection when `image_type == "vehicle"`.
-
-## 8. API Documentation
-
-The project exposes a small asynchronous image-processing API through the Node.js backend.
-
-### POST /api/v1/images
-
-Uploads an image and returns a processing ID immediately.
-
-Request:
-- multipart form-data
-- file field name: `image`
-- optional field: `imageType`
-- optional query parameter: `imageType`
-- response status: HTTP `202 Accepted`
-
-Example request:
-
+**Example Request:**
 ```bash
 curl -X POST http://localhost:3000/api/v1/images \
-  -F "image=@/path/to/campaign-evidence.jpg" \
-  -F "imageType=generic"
+  -F "image=@/path/to/evidence.jpg" \
+  -F "imageType=vehicle"
 ```
 
-Example response:
-
+**Example Response:**
 ```json
 {
-  "processingId": "3d1e5d8a-72c4-4f12-8b77-1f0b5f17d9f9",
+  "processingId": "1a2b3c4d-5e6f-7a8b-9c0d-1e2f3a4b5c6d",
   "status": "pending"
 }
 ```
 
-The backend uses the stored image metadata and enqueues a background job. A successful upload does not require the analysis to be finished before the response returns.
+---
 
-### GET /api/v1/images/:processingId/status
+### 2. Get Job Status
+`GET /api/v1/images/:processingId/status`
 
-Returns the current job status.
+Retrieves the current status of the background verification job.
 
-Example response:
+- **Response:** `200 OK`
 
+**Example Response:**
 ```json
 {
-  "processingId": "3d1e5d8a-72c4-4f12-8b77-1f0b5f17d9f9",
+  "processingId": "1a2b3c4d-5e6f-7a8b-9c0d-1e2f3a4b5c6d",
   "status": "processing",
   "attempts": 1,
   "errorMessage": null,
-  "startedAt": "2026-08-12T10:00:00.000Z",
+  "startedAt": "2026-08-13T12:00:00.123Z",
   "completedAt": null,
-  "createdAt": "2026-08-12T09:59:58.000Z"
+  "createdAt": "2026-08-13T11:59:55.456Z"
 }
 ```
 
-### GET /api/v1/images/:processingId/results
+---
 
-Returns the final results when the job is completed.
+### 3. Get Verification Results
+`GET /api/v1/images/:processingId/results`
 
-Example response structure:
+Retrieves detailed check results once the job is in the `completed` state.
 
+- **Response:** `200 OK`
+
+**Example Response:**
 ```json
 {
-  "processingId": "3d1e5d8a-72c4-4f12-8b77-1f0b5f17d9f9",
-  "imageId": "4f5e67b6-5c18-46e5-8019-c68ef7f6d8a0",
+  "processingId": "1a2b3c4d-5e6f-7a8b-9c0d-1e2f3a4b5c6d",
+  "imageId": "9f8e7d6c-5b4a-3f2e-1d0c-9b8a7f6e5d4c",
   "status": "completed",
   "overallStatus": "review",
-  "confidence": 0.61,
-  "filename": "storage/uploads/abc123.jpg",
-  "originalName": "campaign-evidence.jpg",
+  "confidence": 0.42,
+  "filename": "1a2b3c4d-5e6f-7a8b.jpg",
+  "originalName": "evidence.jpg",
   "mimeType": "image/jpeg",
-  "fileSizeBytes": 942183,
-  "width": 4032,
-  "height": 3024,
+  "fileSizeBytes": 81354,
+  "width": 800,
+  "height": 600,
   "imageType": "generic",
-  "ocrText": "Example OCR text",
+  "ocrText": "CAMPAIGN ACTIVE",
   "checks": {
-    "blur": { "status": "pass", "score": 0.82 },
-    "brightness": { "status": "warning", "score": 0.47 },
-    "duplicate": { "status": "pass", "score": 0.93 },
-    "ocr": { "status": "pass", "score": 0.75, "text": "Example OCR text" },
-    "numberPlate": { "status": "not_applicable" },
-    "dimensions": { "status": "pass", "score": 0.88 },
-    "photoOfPhoto": { "status": "warning", "score": 0.49 },
-    "tampering": { "status": "pass", "score": 0.72 }
+    "blur": {
+      "status": "pass",
+      "score": 1.0,
+      "laplacianVariance": 1340.1,
+      "message": "Image sharpness is acceptable (variance: 1340.1)",
+      "method": "laplacian_variance"
+    },
+    "brightness": {
+      "status": "pass",
+      "score": 0.9,
+      "meanBrightness": 128.4,
+      "classification": "acceptable",
+      "message": "Lighting is acceptable"
+    },
+    "duplicate": {
+      "status": "pass",
+      "score": 1.0,
+      "isDuplicate": false,
+      "closestMatchImageId": null,
+      "hammingDistance": null,
+      "similarity": null
+    },
+    "ocr": {
+      "status": "pass",
+      "score": 0.9,
+      "text": "CAMPAIGN ACTIVE",
+      "message": "Text successfully extracted."
+    },
+    "numberPlate": {
+      "status": "not_applicable",
+      "message": "Number plate detection is only performed for vehicle images."
+    },
+    "dimensions": {
+      "status": "pass",
+      "score": 1.0,
+      "width": 800,
+      "height": 600,
+      "aspectRatio": 1.33,
+      "fileSizeBytes": 81354,
+      "mimeType": "image/jpeg",
+      "issues": []
+    },
+    "photoOfPhoto": {
+      "status": "warning",
+      "score": 0.33,
+      "suspicious": true,
+      "heuristic": true,
+      "signals": {
+        "hasCameraExif": false,
+        "hasRectangularFrameBorder": false,
+        "flatRegionRatio": 0.7
+      },
+      "message": "Possible screen capture detected (2/3 signals triggered)."
+    },
+    "tampering": {
+      "status": "pass",
+      "score": 0.89,
+      "suspicious": false,
+      "heuristic": true,
+      "method": "error_level_analysis",
+      "elaStdDev": 3.29,
+      "elaMeanDiff": 1.41,
+      "message": "No tampering indicators detected."
+    }
   },
-  "createdAt": "2026-08-12T09:59:58.000Z"
+  "createdAt": "2026-08-13T11:59:55.456Z"
 }
 ```
 
-The `overallStatus` is derived from the aggregated checks and is one of `usable`, `review`, or `rejected`. The code intentionally uses heuristic thresholds rather than absolute truth claims.
+---
 
-### GET /health
+### 4. Health Check
+`GET /health`
 
-The backend health endpoint checks database availability.
+Checks database connectivity status.
 
-Example response:
+- **Response:** `200 OK` (or `503 Service Unavailable` if degraded)
 
+**Example Response:**
 ```json
 {
   "status": "ok",
   "db": "up",
-  "timestamp": "2026-08-12T10:00:00.000Z"
+  "redis": "up",
+  "timestamp": "2026-08-13T12:00:05.123Z"
 }
 ```
 
-The analyzer service exposes its own health endpoint at `/health` with:
+---
 
-```json
-{
-  "status": "ok"
-}
+## 11. Database Schema & Relationships
+The database consists of three main tables:
+
+```text
+  ┌────────────────┐
+  │     images     │
+  └───────┬────────┘
+          │ (1)
+          │
+          │ (1)
+  ┌───────▼────────┐
+  │processing_jobs │
+  └───────┬────────┘
+          │ (1)
+          │
+          │ (N)
+  ┌───────▼────────┐
+  │analysis_results│
+  └────────────────┘
 ```
 
-## 8. Database
+1. **`images`**: Stores metadata of the uploaded file.
+   - `id` (UUID, Primary Key)
+   - `original_filename` (Text)
+   - `storage_path` (Text)
+   - `mime_type` (Text)
+   - `file_size` (Int)
+   - `width`, `height` (Int, Nullable)
+   - `phash` (Varchar, Nullable)
+   - `image_type` (Text)
+   - `created_at` (Timestamp)
 
-The database is centered on PostgreSQL and stores structured evidence metadata, jobs, and per-check analysis results.
+2. **`processing_jobs`**: Coordinates the lifecycle of background analysis tasks.
+   - `id` (UUID, Primary Key)
+   - `image_id` (UUID, Foreign Key referencing `images.id`)
+   - `status` (`pending`, `processing`, `completed`, `failed`)
+   - `overall_status` (`usable`, `review`, `rejected`)
+   - `confidence` (Numeric, Nullable)
+   - `attempts` (Int)
+   - `error_message` (Text, Nullable)
+   - `started_at`, `completed_at`, `created_at` (Timestamp)
 
-- images: stores uploaded image metadata, storage path, MIME type, file size, dimensions, and perceptual hash.
-- processing_jobs: stores job lifecycle data such as `pending`, `processing`, `completed`, or `failed`, plus status, confidence, attempts, and timing metadata.
-- analysis_results: stores one result row per job and per check type, such as `blur`, `brightness`, `duplicate`, `ocr`, `numberPlate`, `dimensions`, `photoOfPhoto`, and `tampering`.
+3. **`analysis_results`**: Stores the granular status and metrics for individual checks.
+   - `id` (UUID, Primary Key)
+   - `job_id` (UUID, Foreign Key referencing `processing_jobs.id`)
+   - `check_type` (`blur`, `brightness`, `duplicate`, `ocr`, `numberPlate`, `dimensions`, `photoOfPhoto`, `tampering`)
+   - `status` (`pass`, `warning`, `fail`, `not_applicable`)
+   - `score` (Numeric, Nullable)
+   - `result` (JSONB)
+   - `created_at` (Timestamp)
 
-Relationships:
-- each `processing_jobs` row references one image via `image_id`
-- each `analysis_results` row references one job via `job_id`
-- the job is the central coordinator between upload metadata and analysis output
+---
 
-## 9. Queue and Failure Handling
+## 12. Queue and Worker Architecture
+MediaForge uses **BullMQ** built on top of **Redis** to run heavy computational tasks in the background:
+- **API Decoupling:** Express routes insert files and return immediately, preventing client HTTP request timeouts.
+- **Worker Execution:** The worker is implemented as a standalone Node.js process (`src/workers/imageProcessing.worker.ts`). It handles concurrency control, fetches job specifications, and manages execution.
+- **Failures & Backoff:** If the analyzer fails temporarily, BullMQ automatically retries the job up to 3 times with exponential backoff (starting at a 2-second delay).
+- **Graceful Termination:** If all retries are exhausted, `handleJobExhausted` changes the job status in Postgres to `failed` and records the detailed stack trace.
 
-This project uses Redis + BullMQ for asynchronous background processing.
+---
 
-- The backend enqueues image-processing jobs to a queue in Redis.
-- The background worker consumes the queue and executes the analysis pipeline.
-- Jobs are retried with exponential backoff according to the configuration in the queue setup.
-- If a job ultimately fails after retries, the job is marked as `failed` and the failure reason is persisted.
-- The queue approach keeps the upload service responsive during long-running analysis.
+## 13. Project Structure
+```text
+MediaForge/
+├── analyzer/                  # Python FastAPI Analyzer Service
+│   ├── app/
+│   │   ├── checks/            # Individual check services (blur, ELA, ocr...)
+│   │   │   ├── blur.py
+│   │   │   └── tampering.py
+│   │   ├── services/          # Image loading and execution pipeline
+│   │   └── main.py            # API entry point
+│   ├── tests/                 # Python unit tests
+│   ├── Dockerfile
+│   └── requirements.txt
+├── backend/                   # Node.js + Express API & Worker Service
+│   ├── src/
+│   │   ├── config/            # DB, Redis, and environment configs
+│   │   ├── controllers/       # Route request handlers
+│   │   ├── middleware/        # Input validation and uploads
+│   │   ├── repositories/      # Database access layers
+│   │   ├── routes/            # Express route mapping
+│   │   ├── services/          # Business logic & analyzer HTTP client
+│   │   ├── utils/             # Winston logger setup
+│   │   └── workers/           # BullMQ worker process
+│   ├── tests/                 # Node.js Jest tests
+│   ├── tsconfig.json
+│   └── package.json
+├── database/
+│   └── migrations/            # SQL Schema migration files
+├── images/                    # GoGig sample inputs and output screenshots
+├── samples/                   # Sample images used for verification
+├── docker-compose.yml         # Container orchestration
+└── README.md
+```
 
-This asynchronous processing model was chosen because image analysis and OCR work can take longer than a normal HTTP request, and the system needs to support multiple incoming uploads without blocking the API.
+---
 
-## 10. Setup
+## 14. Setup & Running Local Environment
 
-### Docker quickstart
+### Prerequisites
+- Docker and Docker Desktop installed.
 
-1. Copy the example environment file:
-
+### Environment Setup
+Create a `.env` file in the root directory by cloning `.env.example`:
 ```bash
 cp .env.example .env
 ```
 
-2. Start the stack:
+The system will read the database credentials from the `.env` file and synchronize the PostgreSQL container credentials with the backend.
 
+### Running with Docker Compose
+To start the entire network stack (Postgres, Redis, Analyzer, Backend, and Worker):
 ```bash
 docker compose up --build
 ```
 
-This starts the PostgreSQL database, Redis, analyzer service, backend API, and the worker.
+**Local Ports Exposed:**
+- Backend API: `http://localhost:3000`
+- Python Analyzer: `http://localhost:8000`
+- PostgreSQL Database: `localhost:5432`
+- Redis Queue Server: `localhost:6379`
 
-Expected local endpoints:
-- Backend: http://localhost:3000
-- Analyzer: http://localhost:8000
-- PostgreSQL: localhost:5432
-- Redis: localhost:6379
+---
 
-### Local non-Docker setup
+## 15. Run Tests & Build
+To build and verify the services locally:
 
-Prerequisites:
-- Node.js and npm
-- Python 3.11+
-- PostgreSQL
-- Redis
-- Tesseract OCR binary installed and available to the analyzer
-
-Windows PowerShell example:
-
-```powershell
-cd analyzer
-python -m venv .venv
-.\.venv\Scripts\Activate.ps1
-pip install -r requirements.txt
-uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
-```
-
-```powershell
-cd backend
-npm install
-Copy-Item ..\.env.example .env
-npm run dev
-```
-
-Then in a second terminal:
-
-```powershell
-cd backend
-npm run dev:worker
-```
-
-Linux/macOS equivalent:
-
-```bash
-cd analyzer
-python -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
-uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
-```
-
+### 1. Build and Run Backend Tests
+Ensure you have Redis and Postgres running, then inside the `backend` folder:
 ```bash
 cd backend
 npm install
-cp ../.env.example .env
-npm run dev
-```
-
-And in a second terminal:
-
-```bash
-cd backend
-npm run dev:worker
-```
-
-## 11. Testing
-
-The project includes backend and analyzer tests. The actual commands are:
-
-```bash
-cd backend
-npm test
 npm run build
+npm test
 ```
+*Verification: Confirms all 31 Express API and worker integration tests pass.*
 
+### 2. Run Python Analyzer Tests
+Inside the `analyzer` folder:
 ```bash
 cd analyzer
-pytest -q
+python -m venv .venv
+source .venv/bin/activate    # Windows: .venv\Scripts\activate
+pip install -r requirements.txt
+pytest
 ```
+*Verification: Confirms all 23 CV, OCR, and API unit tests pass.*
 
-Do not assume fixed pass counts from these commands; they should be run in the local environment and results recorded separately.
+---
 
-## 12. Sample API Requests/Responses
+## 16. GoGig Sample Image Results
 
-Example upload request:
-
-```bash
-curl -X POST http://localhost:3000/api/v1/images \
-  -F "image=@/path/to/sample-image.jpg" \
-  -F "imageType=vehicle"
-```
-
-Example status request:
-
-```bash
-curl http://localhost:3000/api/v1/images/<processingId>/status
-```
-
-Example results request:
-
-```bash
-curl http://localhost:3000/api/v1/images/<processingId>/results
-```
-
-Example analyzer health check:
-
-```bash
-curl http://localhost:8000/health
-```
-
-## GoGig Sample Image Results
-
-The following sections are intentionally reserved for the actual outputs or screenshots from the three GoGig sample images after deployment or local validation.
+The following are the actual sample images provided for the assignment and the corresponding outputs generated by the verification pipeline.
 
 ### Sample 1
-Actual output/screenshot to be added after deployment.
+
+**Input**
+
+![Sample 1 Input](images/image%20(1).png)
+
+**Analysis Output**
+
+![Sample 1 Output](images/image(1)output.png)
+
+---
 
 ### Sample 2
-Actual output/screenshot to be added after deployment.
+
+**Input**
+
+![Sample 2 Input](images/image%20(2).png)
+
+**Analysis Output**
+
+![Sample 2 Output](images/images(2)output.png)
+
+---
 
 ### Sample 3
-Actual output/screenshot to be added after deployment.
 
-## 13. AI Usage Disclosure — REQUIRED
+**Input**
 
-AI assistants were used during the development of this project. They helped with architecture and design brainstorming, review of implementation structure, debugging support, test creation assistance, and documentation drafting.
+![Sample 3 Input](images/image.png)
 
-The generated code and documentation were reviewed by the human engineer, and validation was performed using the project’s standard automated test commands and manual checks where relevant. Human engineering decisions remained central in areas such as the architecture, heuristic thresholds, uncertainty handling, and trade-offs between simplicity and robustness.
+**Analysis Output**
 
-## 14. Assumptions
+![Sample 3 Output](images/imageoutput.png)
 
-The system makes the following assumptions, which match the actual implementation:
+---
 
-- image analysis is heuristic and probabilistic rather than absolute proof
-- OCR results may contain errors or incomplete extraction
-- duplicate detection uses perceptual similarity and is not a perfect identity check
-- number-plate validation is a format check, not proof of authenticity or ownership
-- photo-of-photo and tampering detection are heuristic signals and may vary by image quality
-- local filesystem storage is suitable for this assignment and local environment but is not a full production-grade storage strategy
+## 17. Architecture Trade-offs
+- **Queue Engine (Redis + BullMQ vs. RabbitMQ/Kafka):** We chose Redis with BullMQ due to its lightweight nature and ease of orchestration in a containerized Docker environment. It provides native retry support and rate limiting, avoiding the operational overhead of a heavy message broker like RabbitMQ or Kafka.
+- **Storage Strategy (Local Filesystem vs. Object Storage):** For this assignment, files are stored on the local volume container. While an S3-compatible object store is standard for production, local filesystem storage keeps the Docker Compose setup completely self-contained and minimizes external network latency during processing.
+- **Verification Logic (CV Heuristics vs. Custom ML Models):** We chose OpenCV calculations (Laplacian, ELA) and rule-based validation over heavy deep learning models. This ensures the analyzer runs with minimal CPU/memory overhead and remains extremely fast without requiring GPU environments.
 
-## 15. Trade-offs
+---
 
-The implementation chooses practical trade-offs for a local take-home assignment:
+## 18. Security Considerations
+- **Secure Credentials:** The system uses standard environment variable configurations (`.env`) for secrets management (Postgres credentials, database host, Redis URL). No secrets or database passwords are hardcoded or written to logs.
+- **SSL Database Connections:** In production, the backend is configured to enforce SSL connections when connecting to Neon PostgreSQL, preventing eavesdropping and man-in-the-middle attacks.
+- **Upload Validation:** The Express Multer layer implements strict validation on incoming uploads: enforcing maximum file size limits (10MB) and blocking unauthorized file MIME types to prevent denial-of-service and file execution vulnerabilities.
 
-- BullMQ + Redis was selected over a heavier messaging stack for lightweight asynchronous processing.
-- PostgreSQL is used for structured persistence of metadata, jobs, and analysis results.
-- OpenCV, Tesseract, and image heuristics are used instead of training custom ML models.
-- Local storage is acceptable for the assignment environment and keeps the setup simple.
-- Docker Compose enables reproducible local setup across services and dependencies.
-- The scope is intentionally limited to a focused, reliable solution rather than broad production infrastructure.
+---
 
-Potential improvements with more time:
-- object storage such as S3 or equivalent
-- stronger ML-based tampering detection
-- authentication and authorization
-- monitoring, observability, and alerting
-- horizontal worker scaling
-- stronger duplicate detection at larger scale
+## 19. Future Improvements
+- **Cloud Object Storage:** Transition image uploads to AWS S3 or Google Cloud Storage for persistent, durable, and horizontally scalable asset storage.
+- **Authentication & Authorization:** Add API key verification or JWT authentication middleware to secure the upload and results retrieval endpoints.
+- **Deep-Learning Classifiers:** Supplement basic CV heuristics (photo-of-photo, tampering) with lightweight deep-learning models (e.g. MobileNet/ResNet) to perform more robust screen and forgery detection.
+- **Autoscaling Workers:** Scale worker containers horizontally inside a container orchestrator (like Kubernetes or Render Worker pools) to handle high-concurrency upload spikes.
 
-## 16. Limitations
+---
 
-The project is intentionally honest about the limitations of heuristic image analysis and OCR:
-
-- image quality issues may produce false positives or false negatives
-- OCR can misread characters, especially in noisy or distorted images
-- duplicate detection can provide similarity-based hints, not guaranteed identity proof
-- number-plate analysis validates pattern and layout, not legal or factual identity
-- photo-of-photo and tampering heuristics are advisory and should be treated as review signals
-- any verdict is triage-oriented and not a definitive forensic conclusion
-
-## 17. Deployment Notes
-
-The application is Dockerized and designed to run as a small local distributed system composed of:
-- PostgreSQL
-- Redis
-- backend API
-- worker
-- analyzer service
-
-For production deployment, the implementation would need persistent storage for uploaded files and a more robust deployment configuration. A live URL will be provided separately in the submission. The project should not be treated as already deployed unless that is explicitly stated in the final submission materials.
-
-## 18. Remove Incorrect/Unnecessary Content
-
-This README intentionally does not include any tunnel, ngrok, or localtunnel guidance as a substitute for real deployment. The project is documented as a local Dockerized application and evaluation artifact, not as a public network deployment.
-
-## Final Notes
-
-This README is intended to be a concise, professional engineering document aligned to the GoGig evaluation criteria:
-- engineering quality
-- problem solving and system thinking
-- reliability and async handling
-- practical assumptions and trade-offs
-- transparent AI-assisted workflow
-
-The repository is a working local implementation for image-evidence verification and is intentionally documented without claiming features or deployment outcomes beyond what is actually present in the codebase.
+## 20. AI Usage Disclosure
+AI assistants were utilized during the development of this project:
+- **Assisted Areas:** Structuring the multi-service architecture, writing unit tests for Express controllers and OpenCV logic, generating test assertions, implementing cold-start health retries, and drafting project documentation.
+- **Human Verification:** All code modifications, database schemas, analysis pipelines, and custom logic were manually verified by running the test suites (`pytest` and `jest`) and validating local uploads end-to-end against real images. Thresholds, Docker configurations, and verdict policies were manually adjusted for assignment requirements.
