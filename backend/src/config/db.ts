@@ -8,6 +8,9 @@ export const pool = new Pool({
   user: env.postgres.user,
   password: env.postgres.password,
   database: env.postgres.database,
+  ssl: {
+    rejectUnauthorized: false,
+  },
   max: 10,
   idleTimeoutMillis: 30000,
 });
