@@ -61,12 +61,9 @@ export function computeVerdict(checks: CheckSummary[]): { overallStatus: Overall
 
   // Determine verdict from confidence thresholds + hard-fail guard-rails
   let overallStatus: OverallStatus;
-  if (hardFailCount >= 2) {
-    // Multiple technical failures → rejected regardless
+  if (hardFailCount >= 1) {
+    // Technical failure -> rejected
     overallStatus = 'rejected';
-  } else if (hardFailCount === 1) {
-    // Single technical failure → cap at review (never auto-reject)
-    overallStatus = confidence >= 0.35 ? 'review' : 'rejected';
   } else if (hasReviewSignal) {
     // No hard fails, but heuristic warnings → review
     overallStatus = confidence >= 0.65 ? 'review' : (confidence >= 0.35 ? 'review' : 'rejected');

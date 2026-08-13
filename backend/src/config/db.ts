@@ -2,15 +2,16 @@ import { Pool } from 'pg';
 import { env } from './env';
 import { logger } from '../utils/logger';
 
+const useSsl = process.env.POSTGRES_SSL === 'true' || 
+                (process.env.NODE_ENV === 'production' && process.env.POSTGRES_SSL !== 'false');
+
 export const pool = new Pool({
   host: env.postgres.host,
   port: env.postgres.port,
   user: env.postgres.user,
   password: env.postgres.password,
   database: env.postgres.database,
-  ssl: {
-    rejectUnauthorized: false,
-  },
+  ssl: useSsl ? { rejectUnauthorized: false } : false,
   max: 10,
   idleTimeoutMillis: 30000,
 });

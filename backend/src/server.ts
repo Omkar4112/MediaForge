@@ -8,7 +8,9 @@ import { logger } from './utils/logger';
 // HTTP-server process.
 if (process.env.START_WORKER_IN_PROCESS === 'true') {
   logger.info('START_WORKER_IN_PROCESS=true — starting BullMQ worker in-process');
-  import('./workers/imageProcessing.worker.js').catch((err) => {
+  const isTs = __filename.endsWith('.ts');
+  const workerPath = isTs ? './workers/imageProcessing.worker.ts' : './workers/imageProcessing.worker.js';
+  import(workerPath).catch((err) => {
     logger.error('Failed to start in-process worker', { error: (err as Error).message });
   });
 } else {
