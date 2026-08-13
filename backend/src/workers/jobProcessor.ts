@@ -28,7 +28,9 @@ export async function processImageJob(job: Job<ImageProcessingJobData>): Promise
     // 2. Persist phash + dimensions discovered by the analyzer back onto the image row.
     const width = Number(analysis.dimensions.width ?? 0) || null;
     const height = Number(analysis.dimensions.height ?? 0) || null;
+    logger.info('Updating image dimensions and hash in DB', { imageId, width, height, phash: analysis.phash });
     await imageRepository.updateImageDimensionsAndHash(imageId, width ?? 0, height ?? 0, analysis.phash ?? null);
+    logger.info('Successfully updated image dimensions and hash in DB', { imageId });
 
     // 3. Duplicate detection is done in the backend so it can query prior images in Postgres.
     const duplicateResult = await checkDuplicate(imageId, analysis.phash ?? null);
@@ -49,6 +51,7 @@ export async function processImageJob(job: Job<ImageProcessingJobData>): Promise
       { checkType: 'tampering', status: analysis.tampering.status, score: (analysis.tampering.score as number) ?? null, result: analysis.tampering },
     ];
 
+    logger.info('Inserting/updating check results in DB', { jobId, checksCount: checkResults.length });
     for (const check of checkResults) {
       await resultRepository.upsertAnalysisResult({
         jobId,
@@ -58,6 +61,7 @@ export async function processImageJob(job: Job<ImageProcessingJobData>): Promise
         result: check.result,
       });
     }
+    logger.info('Successfully inserted/updated check results in DB', { jobId });
 
     const summaries: CheckSummary[] = checkResults.map((c) => ({
       checkType: c.checkType,
@@ -66,7 +70,9 @@ export async function processImageJob(job: Job<ImageProcessingJobData>): Promise
     }));
     const { overallStatus, confidence } = computeVerdict(summaries);
 
+    logger.info('Marking job as completed in DB', { jobId, overallStatus, confidence });
     await jobRepository.markJobCompleted(jobId, overallStatus, confidence);
+    logger.info('Successfully marked job as completed in DB', { jobId });
 
     logger.info('Completed image processing job', { jobId, imageId, overallStatus, confidence });
   } catch (err) {
