@@ -48,7 +48,7 @@ interface ImageResults {
 interface JobStatusResponse {
   processingId: string;
   status: 'pending' | 'processing' | 'completed' | 'failed';
-  error?: string | null;
+  errorMessage?: string | null;
 }
 
 function App() {
@@ -81,12 +81,28 @@ function App() {
     return base ? `${base}${normalizedPath}` : normalizedPath;
   };
 
-  // Poll status when processingId is active
+  // Poll status when processingId is active (max ~90 seconds)
   useEffect(() => {
     if (!processingId) return;
 
+    const POLL_TIMEOUT_MS = 90_000;
+    const POLL_INTERVAL_MS = 1500;
+    const startedAt = Date.now();
     let timer: number;
+    let cancelled = false;
+
     const pollStatus = async () => {
+      if (cancelled) return;
+
+      // Check timeout before polling
+      if (Date.now() - startedAt > POLL_TIMEOUT_MS) {
+        setJobStatus('failed');
+        setJobError(
+          'Processing is taking longer than expected. Your image was uploaded successfully — please try again in a few moments.'
+        );
+        return;
+      }
+
       try {
         const response = await fetch(getApiUrl(`/api/v1/images/${processingId}/status`));
         if (!response.ok) {
@@ -99,20 +115,26 @@ function App() {
           // Fetch final results
           fetchResults(processingId);
         } else if (data.status === 'failed') {
-          setJobError(data.error || 'Job processing failed.');
+          setJobError(data.errorMessage || 'Job processing failed.');
         } else {
-          // Poll again in 1.5 seconds
-          timer = window.setTimeout(pollStatus, 1500);
+          // Poll again
+          timer = window.setTimeout(pollStatus, POLL_INTERVAL_MS);
         }
       } catch (err: any) {
-        setError(err.message || 'Error tracking job status');
-        setJobStatus('failed');
+        // Network errors during polling are transient — retry up to the timeout
+        if (Date.now() - startedAt < POLL_TIMEOUT_MS) {
+          timer = window.setTimeout(pollStatus, POLL_INTERVAL_MS);
+        } else {
+          setError(err.message || 'Error tracking job status');
+          setJobStatus('failed');
+        }
       }
     };
 
     pollStatus();
 
     return () => {
+      cancelled = true;
       if (timer) clearTimeout(timer);
     };
   }, [processingId]);
