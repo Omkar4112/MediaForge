@@ -31,10 +31,10 @@ const client = axios.create({
 
 export async function wakeAnalyzer(): Promise<void> {
   const healthUrl = `${env.analyzer.baseUrl}/health`;
-  const maxAttempts = 15;
+  const maxAttempts = 30;
   const delayMs = 5000;
 
-  logger.info('Analyzer wake-up process started...', { url: healthUrl });
+  logger.info('Waking analyzer: Checking health status', { url: healthUrl });
 
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     try {
@@ -43,7 +43,7 @@ export async function wakeAnalyzer(): Promise<void> {
       });
 
       if (response.status === 200 && response.data?.status === 'ok') {
-        logger.info('Analyzer is ready and healthy.', { attempt });
+        logger.info('Analyzer ready: health check passed', { url: healthUrl, attempt });
         return;
       }
 
@@ -59,15 +59,19 @@ export async function wakeAnalyzer(): Promise<void> {
         status === 502 ||
         status === 503 ||
         status === 504 ||
-        code === 'ECONNREFUSED' ||
-        code === 'ETIMEDOUT' ||
-        code === 'ENOTFOUND' ||
-        code === 'ECONNRESET' ||
+        [
+          'ECONNREFUSED',
+          'ETIMEDOUT',
+          'ENOTFOUND',
+          'ECONNRESET',
+          'EHOSTUNREACH',
+          'ENETUNREACH',
+          'EPIPE',
+        ].includes(code) ||
         err.message?.toLowerCase().includes('timeout');
 
       if (isTransient) {
-        logger.info(`Analyzer is still unavailable / waking up (attempt ${attempt}/${maxAttempts})...`, {
-          error: err.message,
+        logger.info(`Analyzer unavailable (attempt ${attempt}/${maxAttempts}): ${err.message}. Retrying in ${delayMs / 1000}s...`, {
           code,
           status,
         });
@@ -86,7 +90,7 @@ export async function wakeAnalyzer(): Promise<void> {
     }
   }
 
-  logger.error('Analyzer wake-up failed: maximum retry attempts exhausted');
+  logger.error('Final failure: Analyzer wake-up failed: maximum retry attempts exhausted');
   throw new Error('Analyzer failed to wake up after maximum retry attempts');
 }
 
@@ -100,7 +104,7 @@ export async function analyzeImage(
 
   // 2. Perform the actual POST request
   const url = `${env.analyzer.baseUrl}/analyze`;
-  logger.info('Sending POST request to analyzer', {
+  logger.info('Analyze request: Sending POST to analyzer', {
     url,
     mimeType,
     imageType,
@@ -150,14 +154,19 @@ export async function analyzeImage(
         status === 502 ||
         status === 503 ||
         status === 504 ||
-        code === 'ECONNREFUSED' ||
-        code === 'ETIMEDOUT' ||
-        code === 'ENOTFOUND' ||
-        code === 'ECONNRESET' ||
+        [
+          'ECONNREFUSED',
+          'ETIMEDOUT',
+          'ENOTFOUND',
+          'ECONNRESET',
+          'EHOSTUNREACH',
+          'ENETUNREACH',
+          'EPIPE',
+        ].includes(code) ||
         err.message?.toLowerCase().includes('timeout');
 
       if (isTransient && attempt < maxAttempts) {
-        logger.warn(`Analyzer analyze request failed transiently (attempt ${attempt}/${maxAttempts}). Retrying in ${delayMs / 1000}s...`, {
+        logger.warn(`Retry: Analyzer analyze request failed transiently (attempt ${attempt}/${maxAttempts}). Retrying in ${delayMs / 1000}s...`, {
           error: err.message,
           code,
           status,
@@ -173,10 +182,11 @@ export async function analyzeImage(
         statusText: err.response?.statusText,
         responseData: err.response?.data,
       };
-      logger.error('Analyzer request failed permanently', errorDetails);
+      logger.error('Final failure: Analyzer request failed permanently', errorDetails);
       throw err;
     }
   }
+  logger.error('Final failure: Analyzer request failed after maximum retry attempts');
   throw new Error('Analyzer request failed after maximum retry attempts');
 }
 

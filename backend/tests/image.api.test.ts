@@ -4,6 +4,16 @@ jest.mock('../src/config/db', () => ({
   pool: { query: jest.fn().mockResolvedValue({ rows: [] }) },
   checkDbConnection: jest.fn().mockResolvedValue(true),
 }));
+jest.mock('ioredis', () => {
+  return jest.fn().mockImplementation(() => {
+    return {
+      on: jest.fn(),
+      connect: jest.fn().mockResolvedValue(undefined),
+      ping: jest.fn().mockResolvedValue('PONG'),
+      disconnect: jest.fn(),
+    };
+  });
+});
 
 import request from 'supertest';
 import { createApp } from '../src/app';
