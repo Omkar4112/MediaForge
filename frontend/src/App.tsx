@@ -197,7 +197,7 @@ function App() {
 
         if (elapsedSeconds >= 90) {
           setServerCheckState('timeout');
-          setError('Server took too long to start. Please try again.');
+          setError('Verification server took too long to start. This can happen with free-tier hosting after inactivity. Please try again.');
           return false;
         }
 
@@ -314,6 +314,7 @@ function App() {
     setJobError(null);
     setJobStatus(null);
     setProcessingId(null);
+    setIsUploading(true);
 
     const backendReady = await waitForBackendToWakeUp();
     if (!backendReady) {
@@ -338,6 +339,7 @@ function App() {
     setJobStatus(null);
     setJobError(null);
     setResults(null);
+    setServerCheckState('idle');
   };
 
   const formatBytes = (bytes: number): string => {
@@ -472,7 +474,7 @@ function App() {
                 {serverCheckState === 'starting' && (
                   <>
                     <div style={{ fontWeight: 600 }}>🟡 Starting verification server...</div>
-                    <div style={{ marginTop: '4px', fontSize: '0.82rem' }}>The server is waking up. This may take up to 60 seconds on the free hosting tier.</div>
+                    <div style={{ marginTop: '4px', fontSize: '0.82rem' }}>This may take a little longer on the first request because the analysis server may need to wake up after inactivity.</div>
                     <div style={{ marginTop: '6px', fontSize: '0.8rem' }}>Server starting... {startupElapsed}s</div>
                   </>
                 )}
@@ -481,7 +483,8 @@ function App() {
                 )}
                 {serverCheckState === 'timeout' && (
                   <>
-                    <div style={{ fontWeight: 600 }}>🔴 Server took too long to start. Please try again.</div>
+                    <div style={{ fontWeight: 600 }}>🔴 Verification server took too long to start.</div>
+                    <div style={{ marginTop: '4px', fontSize: '0.82rem' }}>This can happen with free-tier hosting after inactivity. Please try again.</div>
                     <button
                       type="button"
                       onClick={retryUpload}
@@ -510,7 +513,7 @@ function App() {
                 {isUploading ? (
                   <>
                     <RefreshCw className="spinner" size={20} style={{ animation: 'spin 1s linear infinite' }} />
-                    {serverCheckState === 'starting' ? 'Starting server...' : 'Uploading...'}
+                    {serverCheckState === 'starting' ? 'Starting verification server...' : 'Uploading...'}
                   </>
                 ) : (
                   <>
