@@ -69,6 +69,8 @@ function App() {
   const [results, setResults] = useState<ImageResults | null>(null);
 
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const isSubmittingRef = useRef<boolean>(false);
+  const activePollIdRef = useRef<string | null>(null);
 
   const getApiBase = () => {
     const value = import.meta.env.VITE_API_URL || '';
@@ -83,7 +85,13 @@ function App() {
 
   // Poll status when processingId is active (max ~90 seconds)
   useEffect(() => {
-    if (!processingId) return;
+    if (!processingId) {
+      activePollIdRef.current = null;
+      return;
+    }
+
+    if (activePollIdRef.current === processingId) return;
+    activePollIdRef.current = processingId;
 
     const POLL_TIMEOUT_MS = 90_000;
     const POLL_INTERVAL_MS = 1500;
@@ -136,6 +144,9 @@ function App() {
     return () => {
       cancelled = true;
       if (timer) clearTimeout(timer);
+      if (activePollIdRef.current === processingId) {
+        activePollIdRef.current = null;
+      }
     };
   }, [processingId]);
 
@@ -307,8 +318,9 @@ function App() {
 
   const handleUploadSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!file) return;
+    if (!file || isSubmittingRef.current) return;
 
+    isSubmittingRef.current = true;
     setError(null);
     setResults(null);
     setJobError(null);
@@ -319,10 +331,15 @@ function App() {
     const backendReady = await waitForBackendToWakeUp();
     if (!backendReady) {
       setIsUploading(false);
+      isSubmittingRef.current = false;
       return;
     }
 
-    await uploadImage(file, imageType);
+    try {
+      await uploadImage(file, imageType);
+    } finally {
+      isSubmittingRef.current = false;
+    }
   };
 
   const retryUpload = () => {
