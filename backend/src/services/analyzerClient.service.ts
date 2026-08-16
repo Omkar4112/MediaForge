@@ -173,8 +173,8 @@ async function _startBackgroundWake(): Promise<void> {
     return;
   }
 
-  const maxAttempts = 15;                   // 15 attempts × 12s = 180s coverage
-  const delayMs = 12_000;                   // 12s delay to prevent Render's hibernate rate limit
+  const maxAttempts = 9;                    // 9 attempts × 20s = 180s coverage
+  const delayMs = 20_000;                   // 20s delay to be extremely safe under Render's hibernate rate limit
   const perRequestTimeout = 15_000;         // 15s timeout per request
 
   addWakeLog(`BACKGROUND ANALYZER WAKE LOOP STARTED. Target: ${env.analyzer.baseUrl}, maxAttempts: ${maxAttempts}`);
