@@ -2,6 +2,7 @@ import axios from 'axios';
 import fs from 'fs';
 import path from 'path';
 import FormData from 'form-data';
+import IORedis from 'ioredis';
 import { env } from '../config/env';
 import { logger } from '../utils/logger';
 
@@ -102,10 +103,75 @@ export function getWakeLogs(): any {
   };
 }
 
+function getRedisConnection(): IORedis {
+  const redisUrl = process.env.REDIS_URL;
+  return redisUrl
+    ? new IORedis(redisUrl, {
+        maxRetriesPerRequest: 1,
+        enableOfflineQueue: false,
+        connectTimeout: 3000,
+        lazyConnect: true,
+        ...(redisUrl.startsWith('rediss://') ? { tls: { rejectUnauthorized: false } } : {}),
+      })
+    : new IORedis({
+        host: env.redis.host,
+        port: env.redis.port,
+        maxRetriesPerRequest: 1,
+        enableOfflineQueue: false,
+        connectTimeout: 3000,
+        lazyConnect: true,
+      });
+}
+
+async function acquireWakeLock(): Promise<boolean> {
+  const conn = getRedisConnection();
+  try {
+    await conn.connect();
+    const result = await conn.set('analyzer:waking', 'true', 'EX', 20, 'NX');
+    return result === 'OK';
+  } catch (err: any) {
+    addWakeLog(`[RedisLock] Failed to acquire lock (falling back to true): ${err.message}`);
+    return true; // fallback to true so we still wake if Redis has issues
+  } finally {
+    conn.disconnect();
+  }
+}
+
+async function refreshWakeLock(): Promise<void> {
+  const conn = getRedisConnection();
+  try {
+    await conn.connect();
+    await conn.set('analyzer:waking', 'true', 'EX', 20);
+  } catch (err) {
+    // ignore
+  } finally {
+    conn.disconnect();
+  }
+}
+
+async function releaseWakeLock(): Promise<void> {
+  const conn = getRedisConnection();
+  try {
+    await conn.connect();
+    await conn.del('analyzer:waking');
+  } catch (err) {
+    // ignore
+  } finally {
+    conn.disconnect();
+  }
+}
+
 /** Fire-and-forget background loop that pings the analyzer until it wakes. */
-function _startBackgroundWake(): void {
+async function _startBackgroundWake(): Promise<void> {
   if (_backgroundWakeRunning) return;       // singleton guard
   _backgroundWakeRunning = true;
+
+  const hasLock = await acquireWakeLock();
+  if (!hasLock) {
+    addWakeLog('[AnalyzerWake] Another instance is already waking the analyzer. Skipping loop initialization.');
+    _backgroundWakeRunning = false;
+    return;
+  }
 
   const maxAttempts = 15;                   // 15 attempts × 12s = 180s coverage
   const delayMs = 12_000;                   // 12s delay to prevent Render's hibernate rate limit
@@ -114,40 +180,48 @@ function _startBackgroundWake(): void {
   addWakeLog(`BACKGROUND ANALYZER WAKE LOOP STARTED. Target: ${env.analyzer.baseUrl}, maxAttempts: ${maxAttempts}`);
 
   (async () => {
-    // Wait first to avoid back-to-back requests with the quick probe that triggered this
-    await new Promise((resolve) => setTimeout(resolve, delayMs));
+    try {
+      // Wait first to avoid back-to-back requests with the quick probe that triggered this
+      await new Promise((resolve) => setTimeout(resolve, delayMs));
 
-    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-      try {
-        // Hit ONLY /health to check status and wake the service.
-        // Doing multiple requests (like '/' and '/health') back-to-back
-        // triggers Render's strict hibernate-rate-limiter (429).
-        addWakeLog(`[AnalyzerWake] Attempt ${attempt}/${maxAttempts} - Starting GET ${env.analyzer.baseUrl}/health`);
-        const response = await client.get<{ status: string }>('/health', {
-          timeout: perRequestTimeout,
-        });
-
-        const ok = response.status === 200 && response.data?.status === 'ok';
-        addWakeLog(`[AnalyzerWake] Attempt ${attempt}/${maxAttempts} - Health GET response: status=${response.status}, body=${JSON.stringify(response.data)}, ok=${ok}`);
-
-        if (ok) {
-          addWakeLog(`[AnalyzerWake] Analyzer became ready on attempt ${attempt}`);
-          _analyzerCacheResult = true;
-          _analyzerCacheExpiry = Date.now() + ANALYZER_CACHE_TTL_OK_MS;
-          _backgroundWakeRunning = false;
+      for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+        if (!_backgroundWakeRunning) {
+          addWakeLog('[AnalyzerWake] Background wake loop terminated early (loop flag is false).');
           return;
         }
-      } catch (err: any) {
-        addWakeLog(`[AnalyzerWake] Attempt ${attempt}/${maxAttempts} - Health GET failed`, err);
+        try {
+          await refreshWakeLock();
+          // Hit ONLY /health to check status and wake the service.
+          // Doing multiple requests (like '/' and '/health') back-to-back
+          // triggers Render's strict hibernate-rate-limiter (429).
+          addWakeLog(`[AnalyzerWake] Attempt ${attempt}/${maxAttempts} - Starting GET ${env.analyzer.baseUrl}/health`);
+          const response = await client.get<{ status: string }>('/health', {
+            timeout: perRequestTimeout,
+          });
+
+          const ok = response.status === 200 && response.data?.status === 'ok';
+          addWakeLog(`[AnalyzerWake] Attempt ${attempt}/${maxAttempts} - Health GET response: status=${response.status}, body=${JSON.stringify(response.data)}, ok=${ok}`);
+
+          if (ok) {
+            addWakeLog(`[AnalyzerWake] Analyzer became ready on attempt ${attempt}`);
+            _analyzerCacheResult = true;
+            _analyzerCacheExpiry = Date.now() + ANALYZER_CACHE_TTL_OK_MS;
+            return;
+          }
+        } catch (err: any) {
+          addWakeLog(`[AnalyzerWake] Attempt ${attempt}/${maxAttempts} - Health GET failed`, err);
+        }
+
+        if (attempt < maxAttempts) {
+          await new Promise((resolve) => setTimeout(resolve, delayMs));
+        }
       }
 
-      if (attempt < maxAttempts) {
-        await new Promise((resolve) => setTimeout(resolve, delayMs));
-      }
+      addWakeLog('[AnalyzerWake] BACKGROUND ANALYZER WAKE LOOP EXHAUSTED ALL ATTEMPTS. Analyzer did not become ready.');
+    } finally {
+      await releaseWakeLock();
+      _backgroundWakeRunning = false;
     }
-
-    addWakeLog('[AnalyzerWake] BACKGROUND ANALYZER WAKE LOOP EXHAUSTED ALL ATTEMPTS. Analyzer did not become ready.');
-    _backgroundWakeRunning = false;
   })().catch((err) => {
     addWakeLog('[AnalyzerWake] BACKGROUND ANALYZER WAKE LOOP UNEXPECTED ERROR', err);
     _backgroundWakeRunning = false;
@@ -166,7 +240,6 @@ export async function checkAnalyzerHealthDirect(): Promise<boolean> {
   // Return cached result if fresh
   if (_analyzerCacheResult !== null && now < _analyzerCacheExpiry) {
     if (!_analyzerCacheResult) {
-      addWakeLog('[HealthCheck] Cached result is DOWN, background loop is not running. Starting background loop.');
       _startBackgroundWake();
     }
     return _analyzerCacheResult;
