@@ -173,16 +173,17 @@ async function _startBackgroundWake(): Promise<void> {
     return;
   }
 
-  const maxAttempts = 9;                    // 9 attempts × 20s = 180s coverage
-  const delayMs = 20_000;                   // 20s delay to be extremely safe under Render's hibernate rate limit
+  const maxAttempts = 4;                    // 4 attempts × 20s = 80s coverage (+35s initial = 115s total coverage)
+  const initialDelayMs = 35_000;            // wait 35s first to let container boot and rate-limit clear
+  const delayMs = 20_000;                   // 20s delay between checks
   const perRequestTimeout = 15_000;         // 15s timeout per request
 
   addWakeLog(`BACKGROUND ANALYZER WAKE LOOP STARTED. Target: ${env.analyzer.baseUrl}, maxAttempts: ${maxAttempts}`);
 
   (async () => {
     try {
-      // Wait first to avoid back-to-back requests with the quick probe that triggered this
-      await new Promise((resolve) => setTimeout(resolve, delayMs));
+      // Wait first to let rate limits clear and container boot up
+      await new Promise((resolve) => setTimeout(resolve, initialDelayMs));
 
       for (let attempt = 1; attempt <= maxAttempts; attempt++) {
         if (!_backgroundWakeRunning) {
