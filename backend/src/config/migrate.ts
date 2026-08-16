@@ -3,12 +3,37 @@ import path from 'path';
 import { pool } from './db';
 import { logger } from '../utils/logger';
 
-// Locally (ts-node/dist run from backend/) this resolves to <repo>/database/migrations.
-// In Docker the image copies the migrations folder to /app/database/migrations and sets
-// MIGRATIONS_DIR explicitly, since the container filesystem doesn't mirror the repo layout.
-const MIGRATIONS_DIR = process.env.MIGRATIONS_DIR
-  ? path.resolve(process.env.MIGRATIONS_DIR)
-  : path.resolve(__dirname, '../../../database/migrations');
+// Locally (ts-node / compiled JS from backend/dist/config/) __dirname is
+//   <repo>/backend/{src,dist}/config  →  three levels up reaches <repo>/database/migrations.
+// In Docker the image layout is /app/dist/config/ and migrations live at /app/database/migrations
+//   →  only two levels up.
+// MIGRATIONS_DIR env override always wins.  Otherwise we probe both candidate paths at startup
+// and use whichever exists, so one Dockerfile + one ts source works everywhere.
+function resolveMigrationsDir(): string {
+  if (process.env.MIGRATIONS_DIR) {
+    return path.resolve(process.env.MIGRATIONS_DIR);
+  }
+
+  // Candidate paths ordered from most-specific (Docker) to least (local dev/prod)
+  const candidates = [
+    path.resolve(__dirname, '../../database/migrations'),   // Docker: /app/dist/config → /app/database/migrations
+    path.resolve(__dirname, '../../../database/migrations'), // Local:  backend/{src,dist}/config → <repo>/database/migrations
+  ];
+
+  for (const candidate of candidates) {
+    try {
+      fs.accessSync(candidate, fs.constants.R_OK);
+      return candidate;
+    } catch {
+      // candidate doesn't exist or isn't readable, try next
+    }
+  }
+
+  // Fallback: return the Docker-expected path so the error message is actionable
+  return candidates[0];
+}
+
+const MIGRATIONS_DIR = resolveMigrationsDir();
 
 async function ensureMigrationsTable(): Promise<void> {
   await pool.query(`
