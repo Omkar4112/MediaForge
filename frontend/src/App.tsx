@@ -71,6 +71,25 @@ function App() {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const isSubmittingRef = useRef<boolean>(false);
   const activePollIdRef = useRef<string | null>(null);
+  const hasTriggeredWakeRef = useRef<boolean>(false);
+
+  // Proactively trigger the Render analyzer cold start when the app loads.
+  useEffect(() => {
+    if (hasTriggeredWakeRef.current) return;
+    hasTriggeredWakeRef.current = true;
+
+    console.log('[BROWSER-WAKE] Sending proactive trigger to wake up Render Analyzer...');
+    fetch('https://mediaforge-analyzer.onrender.com/health', {
+      method: 'GET',
+      mode: 'no-cors',
+    })
+      .then(() => {
+        console.log('[BROWSER-WAKE] Proactive analyzer wake-up request initiated successfully.');
+      })
+      .catch((err: any) => {
+        console.warn('[BROWSER-WAKE] Proactive wake-up call completed (request sent, network/CORS error ignored):', err.message);
+      });
+  }, []);
 
   const getApiBase = () => {
     const value = import.meta.env.VITE_API_URL || '';

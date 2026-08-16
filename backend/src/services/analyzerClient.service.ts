@@ -329,30 +329,30 @@ export async function wakeAnalyzer(): Promise<void> {
   let attempt429Count = 0;
   const max429Attempts = 5;
 
-  logger.info(`Waking analyzer: Starting health check verification loop against ${healthUrl}`);
+  logger.info(`[ANALYZER] Waking analyzer: Starting health check verification loop against ${healthUrl}`);
 
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-    logger.info(`Analyzer wake-up: Attempt ${attempt}/${maxAttempts} to GET ${healthUrl}`);
+    logger.info(`[ANALYZER] Analyzer wake-up: Attempt ${attempt}/${maxAttempts} to GET ${healthUrl}`);
     try {
       const response = await client.get<{ status: string }>('/health', {
         timeout: 10000,
       });
 
       const hasStatusOk = response.status === 200 && response.data?.status === 'ok';
-      logger.info(`Analyzer health check response status: ${response.status}, body: ${JSON.stringify(response.data)}`);
+      logger.info(`[ANALYZER] Analyzer health check response status: ${response.status}, body: ${JSON.stringify(response.data)}`);
 
       if (hasStatusOk) {
-        logger.info(`Analyzer became ready: Health check passed on attempt ${attempt}`);
+        logger.info(`[ANALYZER] Analyzer became ready: Health check passed on attempt ${attempt}`);
         return;
       }
 
-      logger.warn(`Analyzer health response status is ${response.status} but response is not "ok"`, {
+      logger.warn(`[ANALYZER] Analyzer health response status is ${response.status} but response is not "ok"`, {
         data: response.data,
         attempt,
       });
       
       if (attempt < maxAttempts) {
-        logger.info(`Retry reason: Response status is 200 but body is not "ok". Retrying in ${delayMs / 1000}s...`);
+        logger.info(`[ANALYZER] Retry reason: Response status is 200 but body is not "ok". Retrying in ${delayMs / 1000}s...`);
         await new Promise((resolve) => setTimeout(resolve, delayMs));
         continue;
       }
@@ -377,7 +377,7 @@ export async function wakeAnalyzer(): Promise<void> {
         sourceService = isRender ? 'Render Load Balancer' : 'FastAPI Analyzer Service';
       }
 
-      logger.warn(`Analyzer health response status: ${responseStatus}, error: ${err.message}`, {
+      logger.warn(`[ANALYZER] Analyzer health response status: ${responseStatus}, error: ${err.message}`, {
         url: requestUrl,
         method,
         code,
@@ -389,7 +389,7 @@ export async function wakeAnalyzer(): Promise<void> {
       if (is429) {
         attempt429Count++;
         if (attempt429Count > max429Attempts) {
-          logger.error('Final failure: Analyzer health check received HTTP 429 and exceeded maximum 429 retries', {
+          logger.error('[ANALYZER] Final failure: Analyzer health check received HTTP 429 and exceeded maximum 429 retries', {
             attempt429Count,
             max429Attempts,
           });
@@ -438,7 +438,7 @@ export async function wakeAnalyzer(): Promise<void> {
           }
         }
 
-        logger.info(`Retry reason: ${retryReason}. Retrying in ${currentDelay / 1000}s...`, {
+        logger.info(`[ANALYZER] Retry reason: ${retryReason}. Retrying in ${currentDelay / 1000}s...`, {
           code,
           status,
           attempt,
@@ -449,7 +449,7 @@ export async function wakeAnalyzer(): Promise<void> {
           continue;
         }
       } else {
-        logger.error('Non-transient error during analyzer wake-up check', {
+        logger.error('[ANALYZER] Non-transient error during analyzer wake-up check', {
           error: err.message,
           code,
           status,
@@ -459,7 +459,7 @@ export async function wakeAnalyzer(): Promise<void> {
     }
   }
 
-  logger.error('Final failure: Analyzer wake-up failed: maximum retry attempts exhausted');
+  logger.error('[ANALYZER] Final failure: Analyzer wake-up failed: maximum retry attempts exhausted');
   throw new Error('Analyzer failed to wake up after maximum retry attempts');
 }
 
@@ -480,7 +480,7 @@ export async function analyzeImage(
   const max429Attempts = 3;
 
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-    logger.info(`POST /analyze attempt ${attempt}/${maxAttempts} for file: ${path.basename(absoluteFilePath)}`);
+    logger.info(`[ANALYZE] POST /analyze attempt ${attempt}/${maxAttempts} for file: ${path.basename(absoluteFilePath)}`);
     try {
       const form = new FormData();
       form.append('file', fileBuffer, {
@@ -503,7 +503,7 @@ export async function analyzeImage(
         maxBodyLength: Infinity,
       });
 
-      logger.info(`POST /analyze response status: ${response.status} (Success)`);
+      logger.info(`[ANALYZE] POST /analyze response status: ${response.status} (Success)`);
       return response.data;
     } catch (err: any) {
       const status = err.response?.status;
@@ -526,7 +526,7 @@ export async function analyzeImage(
         sourceService = isRender ? 'Render Load Balancer' : 'FastAPI Analyzer Service';
       }
 
-      logger.warn(`POST /analyze attempt ${attempt}/${maxAttempts} failed: status: ${responseStatus}, error: ${err.message}`, {
+      logger.warn(`[ANALYZE] POST /analyze attempt ${attempt}/${maxAttempts} failed: status: ${responseStatus}, error: ${err.message}`, {
         url: requestUrl,
         method,
         code,
@@ -537,7 +537,7 @@ export async function analyzeImage(
       if (is429) {
         attempt429Count++;
         if (attempt429Count > max429Attempts) {
-          logger.error(`Final failure: Analyzer /analyze request received HTTP 429 and exceeded maximum 429 retries`, {
+          logger.error(`[ANALYZE] Final failure: Analyzer /analyze request received HTTP 429 and exceeded maximum 429 retries`, {
             attempt429Count,
             max429Attempts,
           });
@@ -586,7 +586,7 @@ export async function analyzeImage(
           }
         }
 
-        logger.info(`Retry reason: ${retryReason}. Retrying in ${currentDelay / 1000}s...`, {
+        logger.info(`[ANALYZE] Retry reason: ${retryReason}. Retrying in ${currentDelay / 1000}s...`, {
           code,
           status,
           attempt,
@@ -604,11 +604,11 @@ export async function analyzeImage(
         sourceService,
         attempt,
       };
-      logger.error('Final failure: Analyzer request failed permanently', errorDetails);
+      logger.error('[ANALYZE] Final failure: Analyzer request failed permanently', errorDetails);
       throw err;
     }
   }
-  logger.error('Final failure: Analyzer request failed after maximum retry attempts');
+  logger.error('[ANALYZE] Final failure: Analyzer request failed after maximum retry attempts');
   throw new Error('Analyzer request failed after maximum retry attempts');
 }
 
