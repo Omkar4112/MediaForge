@@ -50,7 +50,7 @@ describe('analyzerClient.service', () => {
 
       const result = await checkAnalyzerHealthDirect();
       expect(result).toBe(true);
-      expect(mockAxiosInstance.get).toHaveBeenCalledWith('/health', { timeout: 5000 });
+      expect(mockAxiosInstance.get).toHaveBeenCalledWith(expect.stringMatching(/\/health\?nocache=\d+/), { timeout: 5000 });
     });
 
     it('returns false when health status is not 200', async () => {

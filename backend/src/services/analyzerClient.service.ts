@@ -195,7 +195,8 @@ async function _startBackgroundWake(): Promise<void> {
           // Doing multiple requests (like '/' and '/health') back-to-back
           // triggers Render's strict hibernate-rate-limiter (429).
           addWakeLog(`[AnalyzerWake] Attempt ${attempt}/${maxAttempts} - Starting GET ${env.analyzer.baseUrl}/health`);
-          const response = await client.get<{ status: string }>('/health', {
+          const t = Date.now();
+          const response = await client.get<{ status: string }>(`/health?nocache=${t}`, {
             timeout: perRequestTimeout,
           });
 
@@ -270,7 +271,8 @@ export async function checkAnalyzerHealthDirect(): Promise<boolean> {
   _analyzerInflight = (async () => {
     try {
       addWakeLog(`[HealthCheck] Cache stale, sending quick health probe to ${env.analyzer.baseUrl}/health`);
-      const response = await client.get<{ status: string }>('/health', {
+      const t = Date.now();
+      const response = await client.get<{ status: string }>(`/health?nocache=${t}`, {
         timeout: 5000,
       });
       const healthy = response.status === 200 && response.data?.status === 'ok';
