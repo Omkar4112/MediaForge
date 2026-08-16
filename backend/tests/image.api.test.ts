@@ -1,5 +1,8 @@
 jest.mock('../src/services/image.service');
 jest.mock('../src/queues/imageProcessing.queue');
+jest.mock('../src/services/analyzerClient.service', () => ({
+  checkAnalyzerHealthDirect: jest.fn().mockResolvedValue(true),
+}));
 jest.mock('../src/config/db', () => ({
   pool: { query: jest.fn().mockResolvedValue({ rows: [] }) },
   checkDbConnection: jest.fn().mockResolvedValue(true),

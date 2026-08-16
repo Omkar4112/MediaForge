@@ -2,6 +2,7 @@ import { Router } from 'express';
 import { checkDbConnection } from '../config/db';
 import IORedis from 'ioredis';
 import { env } from '../config/env';
+import { checkAnalyzerHealthDirect } from '../services/analyzerClient.service';
 
 const router = Router();
 
@@ -73,6 +74,7 @@ function checkRedisHealth(): Promise<boolean> {
 router.get('/health', async (_req, res) => {
   let dbHealthy = false;
   let redisHealthy = false;
+  let analyzerHealthy = false;
 
   try {
     dbHealthy = await checkDbConnection();
@@ -82,12 +84,19 @@ router.get('/health', async (_req, res) => {
 
   redisHealthy = await checkRedisHealth();
 
-  const isHealthy = dbHealthy && redisHealthy;
+  try {
+    analyzerHealthy = await checkAnalyzerHealthDirect();
+  } catch {
+    analyzerHealthy = false;
+  }
+
+  const isHealthy = dbHealthy && redisHealthy && analyzerHealthy;
 
   res.status(isHealthy ? 200 : 503).json({
     status: isHealthy ? 'ok' : 'degraded',
     db: dbHealthy ? 'up' : 'down',
     redis: redisHealthy ? 'up' : 'down',
+    analyzer: analyzerHealthy ? 'up' : 'down',
     timestamp: new Date().toISOString(),
   });
 });

@@ -29,6 +29,17 @@ const client = axios.create({
   timeout: env.analyzer.timeoutMs,
 });
 
+export async function checkAnalyzerHealthDirect(): Promise<boolean> {
+  try {
+    const response = await client.get<{ status: string }>('/health', {
+      timeout: 3000,
+    });
+    return response.status === 200 && response.data?.status === 'ok';
+  } catch (err) {
+    return false;
+  }
+}
+
 export async function wakeAnalyzer(): Promise<void> {
   const healthUrl = `${env.analyzer.baseUrl}/health`;
   const maxAttempts = 30;
@@ -36,23 +47,33 @@ export async function wakeAnalyzer(): Promise<void> {
   let attempt429Count = 0;
   const max429Attempts = 5;
 
-  logger.info('Waking analyzer: Checking health status', { url: healthUrl });
+  logger.info(`Waking analyzer: Starting health check verification loop against ${healthUrl}`);
 
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    logger.info(`Analyzer wake-up: Attempt ${attempt}/${maxAttempts} to GET ${healthUrl}`);
     try {
       const response = await client.get<{ status: string }>('/health', {
         timeout: 10000,
       });
 
-      if (response.status === 200 && response.data?.status === 'ok') {
-        logger.info('Analyzer ready: health check passed', { url: healthUrl, attempt });
+      const hasStatusOk = response.status === 200 && response.data?.status === 'ok';
+      logger.info(`Analyzer health check response status: ${response.status}, body: ${JSON.stringify(response.data)}`);
+
+      if (hasStatusOk) {
+        logger.info(`Analyzer became ready: Health check passed on attempt ${attempt}`);
         return;
       }
 
-      logger.warn(`Analyzer health checked, status ${response.status} but response is not "ok"`, {
+      logger.warn(`Analyzer health response status is ${response.status} but response is not "ok"`, {
         data: response.data,
         attempt,
       });
+      
+      if (attempt < maxAttempts) {
+        logger.info(`Retry reason: Response status is 200 but body is not "ok". Retrying in ${delayMs / 1000}s...`);
+        await new Promise((resolve) => setTimeout(resolve, delayMs));
+        continue;
+      }
     } catch (err: any) {
       const status = err.response?.status;
       const code = err.code;
@@ -74,12 +95,12 @@ export async function wakeAnalyzer(): Promise<void> {
         sourceService = isRender ? 'Render Load Balancer' : 'FastAPI Analyzer Service';
       }
 
-      logger.error('Analyzer wake-up health request failed', {
+      logger.warn(`Analyzer health response status: ${responseStatus}, error: ${err.message}`, {
         url: requestUrl,
         method,
-        status: responseStatus,
-        body: responseBody,
+        code,
         sourceService,
+        attempt,
       });
 
       const is429 = status === 429;
@@ -108,11 +129,13 @@ export async function wakeAnalyzer(): Promise<void> {
           'EHOSTUNREACH',
           'ENETUNREACH',
           'EPIPE',
+          'ECONNABORTED',
         ].includes(code) ||
         err.message?.toLowerCase().includes('timeout');
 
       if (isTransient) {
         let currentDelay = delayMs;
+        let retryReason = `Transient network/service error (status: ${responseStatus}, code: ${code || 'unknown'})`;
         if (is429) {
           const retryAfterHeader = err.response?.headers?.['retry-after'];
           if (retryAfterHeader) {
@@ -125,18 +148,19 @@ export async function wakeAnalyzer(): Promise<void> {
                 currentDelay = Math.max(0, dateMs - Date.now());
               }
             }
-            logger.info(`Respecting Retry-After header: waiting ${currentDelay / 1000}s...`);
+            retryReason = `HTTP 429: Respecting Retry-After header`;
           } else {
             // controlled exponential backoff
             currentDelay = Math.min(30000, 2000 * Math.pow(2, attempt429Count));
-            logger.info(`HTTP 429 with no Retry-After header. Using exponential backoff: waiting ${currentDelay / 1000}s...`);
+            retryReason = `HTTP 429: No Retry-After header, using exponential backoff`;
           }
-        } else {
-          logger.info(`Analyzer unavailable (attempt ${attempt}/${maxAttempts}): ${err.message}. Retrying in ${currentDelay / 1000}s...`, {
-            code,
-            status,
-          });
         }
+
+        logger.info(`Retry reason: ${retryReason}. Retrying in ${currentDelay / 1000}s...`, {
+          code,
+          status,
+          attempt,
+        });
 
         if (attempt < maxAttempts) {
           await new Promise((resolve) => setTimeout(resolve, currentDelay));
@@ -150,10 +174,6 @@ export async function wakeAnalyzer(): Promise<void> {
         });
         throw err;
       }
-    }
-
-    if (attempt < maxAttempts) {
-      await new Promise((resolve) => setTimeout(resolve, delayMs));
     }
   }
 
@@ -171,13 +191,6 @@ export async function analyzeImage(
 
   // 2. Perform the actual POST request
   const url = `${env.analyzer.baseUrl}/analyze`;
-  logger.info('Analyze request: Sending POST to analyzer', {
-    url,
-    mimeType,
-    imageType,
-    filePath: absoluteFilePath,
-  });
-
   const fileBuffer = fs.readFileSync(absoluteFilePath);
   const maxAttempts = 3;
   const delayMs = 3000;
@@ -185,6 +198,7 @@ export async function analyzeImage(
   const max429Attempts = 3;
 
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+    logger.info(`POST /analyze attempt ${attempt}/${maxAttempts} for file: ${path.basename(absoluteFilePath)}`);
     try {
       const form = new FormData();
       form.append('file', fileBuffer, {
@@ -207,13 +221,7 @@ export async function analyzeImage(
         maxBodyLength: Infinity,
       });
 
-      logger.info('Received response from analyzer', {
-        url,
-        status: response.status,
-        statusText: response.statusText,
-        data: response.data,
-      });
-
+      logger.info(`POST /analyze response status: ${response.status} (Success)`);
       return response.data;
     } catch (err: any) {
       const status = err.response?.status;
@@ -236,11 +244,10 @@ export async function analyzeImage(
         sourceService = isRender ? 'Render Load Balancer' : 'FastAPI Analyzer Service';
       }
 
-      logger.error('Analyze request failed', {
+      logger.warn(`POST /analyze attempt ${attempt}/${maxAttempts} failed: status: ${responseStatus}, error: ${err.message}`, {
         url: requestUrl,
         method,
-        status: responseStatus,
-        body: responseBody,
+        code,
         sourceService,
       });
 
@@ -248,7 +255,7 @@ export async function analyzeImage(
       if (is429) {
         attempt429Count++;
         if (attempt429Count > max429Attempts) {
-          logger.error('Final failure: Analyzer /analyze request received HTTP 429 and exceeded maximum 429 retries', {
+          logger.error(`Final failure: Analyzer /analyze request received HTTP 429 and exceeded maximum 429 retries`, {
             attempt429Count,
             max429Attempts,
           });
@@ -270,11 +277,13 @@ export async function analyzeImage(
           'EHOSTUNREACH',
           'ENETUNREACH',
           'EPIPE',
+          'ECONNABORTED',
         ].includes(code) ||
         err.message?.toLowerCase().includes('timeout');
 
       if (isTransient && attempt < maxAttempts) {
         let currentDelay = delayMs;
+        let retryReason = `Transient network/service error (status: ${responseStatus}, code: ${code || 'unknown'})`;
         if (is429) {
           const retryAfterHeader = err.response?.headers?.['retry-after'];
           if (retryAfterHeader) {
@@ -287,19 +296,19 @@ export async function analyzeImage(
                 currentDelay = Math.max(0, dateMs - Date.now());
               }
             }
-            logger.info(`Respecting Retry-After header: waiting ${currentDelay / 1000}s...`);
+            retryReason = `HTTP 429: Respecting Retry-After header`;
           } else {
             // controlled exponential backoff
             currentDelay = Math.min(30000, 2000 * Math.pow(2, attempt429Count));
-            logger.info(`HTTP 429 with no Retry-After header. Using exponential backoff: waiting ${currentDelay / 1000}s...`);
+            retryReason = `HTTP 429: No Retry-After header, using exponential backoff`;
           }
-        } else {
-          logger.warn(`Retry: Analyzer analyze request failed transiently (attempt ${attempt}/${maxAttempts}). Retrying in ${currentDelay / 1000}s...`, {
-            error: err.message,
-            code,
-            status,
-          });
         }
+
+        logger.info(`Retry reason: ${retryReason}. Retrying in ${currentDelay / 1000}s...`, {
+          code,
+          status,
+          attempt,
+        });
         await new Promise((resolve) => setTimeout(resolve, currentDelay));
         continue;
       }
@@ -311,6 +320,7 @@ export async function analyzeImage(
         statusText: err.response?.statusText,
         responseData: err.response?.data,
         sourceService,
+        attempt,
       };
       logger.error('Final failure: Analyzer request failed permanently', errorDetails);
       throw err;
