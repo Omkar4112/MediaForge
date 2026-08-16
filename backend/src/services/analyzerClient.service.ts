@@ -100,8 +100,8 @@ function _startBackgroundWake(): void {
   if (_backgroundWakeRunning) return;       // singleton guard
   _backgroundWakeRunning = true;
 
-  const maxAttempts = 30;
-  const delayMs = 5_000;
+  const maxAttempts = 15;                   // 15 attempts × 12s = 180s coverage
+  const delayMs = 12_000;                   // 12s delay to prevent Render's hibernate rate limit
   const perRequestTimeout = 15_000;         // 15s timeout per request
 
   addWakeLog(`BACKGROUND ANALYZER WAKE LOOP STARTED. Target: ${env.analyzer.baseUrl}, maxAttempts: ${maxAttempts}`);
@@ -109,20 +109,9 @@ function _startBackgroundWake(): void {
   (async () => {
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
       try {
-        // Render sometimes wakes up more reliably when the root path '/' is hit,
-        // or it might return 404/200. We hit '/' to trigger Render's wake-up logic,
-        // and hit '/health' to confirm the application state.
-        addWakeLog(`[AnalyzerWake] Attempt ${attempt}/${maxAttempts} - Starting GET ${env.analyzer.baseUrl}/`);
-        try {
-          const rootResponse = await client.get('/', {
-            timeout: perRequestTimeout,
-          });
-          addWakeLog(`[AnalyzerWake] Attempt ${attempt}/${maxAttempts} - Root GET response status: ${rootResponse.status}`);
-        } catch (rootErr: any) {
-          addWakeLog(`[AnalyzerWake] Attempt ${attempt}/${maxAttempts} - Root GET failed (expected if 404, but wakes Render): status=${rootErr.response?.status ?? 'N/A'}, code=${rootErr.code ?? 'N/A'}`);
-        }
-
-        // Now verify real health
+        // Hit ONLY /health to check status and wake the service.
+        // Doing multiple requests (like '/' and '/health') back-to-back
+        // triggers Render's strict hibernate-rate-limiter (429).
         addWakeLog(`[AnalyzerWake] Attempt ${attempt}/${maxAttempts} - Starting GET ${env.analyzer.baseUrl}/health`);
         const response = await client.get<{ status: string }>('/health', {
           timeout: perRequestTimeout,
@@ -158,16 +147,22 @@ function _startBackgroundWake(): void {
 export async function checkAnalyzerHealthDirect(): Promise<boolean> {
   const now = Date.now();
 
+  // CRITICAL: If the background wake loop is already running, do NOT send any new probe.
+  // Returning immediately prevents overlapping requests that trigger Render's 429 rate limiter.
+  if (_backgroundWakeRunning) {
+    return _analyzerCacheResult ?? false;
+  }
+
   // Return cached result if fresh
   if (_analyzerCacheResult !== null && now < _analyzerCacheExpiry) {
-    if (!_analyzerCacheResult && !_backgroundWakeRunning) {
+    if (!_analyzerCacheResult) {
       addWakeLog('[HealthCheck] Cached result is DOWN, background loop is not running. Starting background loop.');
       _startBackgroundWake();
     }
     return _analyzerCacheResult;
   }
 
-  // Cache is stale
+  // Cache is stale and no background loop is running
   if (_analyzerInflight) {
     return _analyzerInflight;
   }
