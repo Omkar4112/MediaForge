@@ -114,6 +114,9 @@ function _startBackgroundWake(): void {
   addWakeLog(`BACKGROUND ANALYZER WAKE LOOP STARTED. Target: ${env.analyzer.baseUrl}, maxAttempts: ${maxAttempts}`);
 
   (async () => {
+    // Wait first to avoid back-to-back requests with the quick probe that triggered this
+    await new Promise((resolve) => setTimeout(resolve, delayMs));
+
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
       try {
         // Hit ONLY /health to check status and wake the service.
