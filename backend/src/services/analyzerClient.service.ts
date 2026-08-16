@@ -231,9 +231,26 @@ async function _startBackgroundWake(): Promise<void> {
 export async function checkAnalyzerHealthDirect(): Promise<boolean> {
   const now = Date.now();
 
-  // CRITICAL: If the background wake loop is already running, do NOT send any new probe.
+  // CRITICAL: If the local background wake loop is already running, do NOT send any new probe.
   // Returning immediately prevents overlapping requests that trigger Render's 429 rate limiter.
   if (_backgroundWakeRunning) {
+    return _analyzerCacheResult ?? false;
+  }
+
+  // Check Redis lock to see if another instance is already running the wake loop
+  const conn = getRedisConnection();
+  let isWaking = false;
+  try {
+    await conn.connect();
+    const lockExists = await conn.get('analyzer:waking');
+    isWaking = lockExists !== null;
+  } catch (err: any) {
+    isWaking = false;
+  } finally {
+    conn.disconnect();
+  }
+
+  if (isWaking) {
     return _analyzerCacheResult ?? false;
   }
 
