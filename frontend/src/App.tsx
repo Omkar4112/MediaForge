@@ -199,7 +199,7 @@ function App() {
             setStartupElapsed(0);
             return true;
           }
-        } catch (_err) {
+        } catch {
           // Ignore transient wake-up failures and continue polling.
         }
 
