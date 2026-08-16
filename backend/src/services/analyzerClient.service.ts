@@ -28,13 +28,6 @@ export interface AnalyzerResponse {
 const client = axios.create({
   baseURL: env.analyzer.baseUrl,
   timeout: env.analyzer.timeoutMs,
-  headers: {
-    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-    'Accept': 'application/json, text/plain, */*',
-    'Accept-Language': 'en-US,en;q=0.9',
-    'Cache-Control': 'no-cache',
-    'Pragma': 'no-cache',
-  }
 });
 
 // --- Cached analyzer health + background wake-up ---
@@ -173,9 +166,9 @@ async function _startBackgroundWake(): Promise<void> {
     return;
   }
 
-  const maxAttempts = 4;                    // 4 attempts × 20s = 80s coverage (+35s initial = 115s total coverage)
-  const initialDelayMs = 35_000;            // wait 35s first to let container boot and rate-limit clear
-  const delayMs = 20_000;                   // 20s delay between checks
+  const maxAttempts = 3;                    // 3 attempts × 25s = 50s coverage (+45s initial = 95s total coverage)
+  const initialDelayMs = 45_000;            // wait 45s first to let container boot and rate-limit clear
+  const delayMs = 25_000;                   // 25s delay between checks
   const perRequestTimeout = 15_000;         // 15s timeout per request
 
   addWakeLog(`[WAKE] Background analyzer wake loop STARTED. Target URL: ${env.analyzer.baseUrl}`);
