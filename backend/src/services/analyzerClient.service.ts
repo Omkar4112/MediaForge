@@ -29,15 +29,61 @@ const client = axios.create({
   timeout: env.analyzer.timeoutMs,
 });
 
+// --- Cached / throttled analyzer health check ---
+// The backend /health endpoint is polled every ~2s by the frontend.
+// Without throttling, each poll hits the analyzer, flooding it during
+// cold-start and triggering HTTP 429 from Render's rate-limiter.
+//
+// Cache strategy:
+//   - positive result ("ok") cached for 30s
+//   - negative result (down/error) cached for 10s (allows reasonably fast re-probe)
+//   - concurrent requests coalesce onto a single in-flight check
+let _analyzerCacheResult: boolean | null = null;
+let _analyzerCacheExpiry = 0;
+let _analyzerInflight: Promise<boolean> | null = null;
+
+const ANALYZER_CACHE_TTL_OK_MS = 30_000;   // 30s when healthy
+const ANALYZER_CACHE_TTL_DOWN_MS = 10_000;  // 10s when unhealthy
+
 export async function checkAnalyzerHealthDirect(): Promise<boolean> {
-  try {
-    const response = await client.get<{ status: string }>('/health', {
-      timeout: 3000,
-    });
-    return response.status === 200 && response.data?.status === 'ok';
-  } catch (err) {
-    return false;
+  const now = Date.now();
+
+  // Return cached result if fresh
+  if (_analyzerCacheResult !== null && now < _analyzerCacheExpiry) {
+    return _analyzerCacheResult;
   }
+
+  // Coalesce concurrent callers onto a single in-flight request
+  if (_analyzerInflight) {
+    return _analyzerInflight;
+  }
+
+  _analyzerInflight = (async () => {
+    try {
+      const response = await client.get<{ status: string }>('/health', {
+        timeout: 5000,
+      });
+      const healthy = response.status === 200 && response.data?.status === 'ok';
+      _analyzerCacheResult = healthy;
+      _analyzerCacheExpiry = Date.now() + (healthy ? ANALYZER_CACHE_TTL_OK_MS : ANALYZER_CACHE_TTL_DOWN_MS);
+      return healthy;
+    } catch (err) {
+      _analyzerCacheResult = false;
+      _analyzerCacheExpiry = Date.now() + ANALYZER_CACHE_TTL_DOWN_MS;
+      return false;
+    } finally {
+      _analyzerInflight = null;
+    }
+  })();
+
+  return _analyzerInflight;
+}
+
+/** @internal — test-only helper to reset cached state between test cases */
+export function _resetAnalyzerCacheForTesting(): void {
+  _analyzerCacheResult = null;
+  _analyzerCacheExpiry = 0;
+  _analyzerInflight = null;
 }
 
 export async function wakeAnalyzer(): Promise<void> {

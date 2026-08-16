@@ -32,11 +32,13 @@ import {
   checkAnalyzerHealthDirect,
   wakeAnalyzer,
   analyzeImage,
+  _resetAnalyzerCacheForTesting,
 } from '../src/services/analyzerClient.service';
 
 describe('analyzerClient.service', () => {
   beforeEach(() => {
     jest.clearAllMocks();
+    _resetAnalyzerCacheForTesting();
   });
 
   describe('checkAnalyzerHealthDirect', () => {
@@ -48,7 +50,7 @@ describe('analyzerClient.service', () => {
 
       const result = await checkAnalyzerHealthDirect();
       expect(result).toBe(true);
-      expect(mockAxiosInstance.get).toHaveBeenCalledWith('/health', { timeout: 3000 });
+      expect(mockAxiosInstance.get).toHaveBeenCalledWith('/health', { timeout: 5000 });
     });
 
     it('returns false when health status is not 200', async () => {
