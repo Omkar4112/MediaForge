@@ -2,7 +2,7 @@ import { Router } from 'express';
 import { checkDbConnection } from '../config/db';
 import IORedis from 'ioredis';
 import { env } from '../config/env';
-import { checkAnalyzerHealthDirect } from '../services/analyzerClient.service';
+import { checkAnalyzerHealthDirect, getWakeLogs } from '../services/analyzerClient.service';
 
 const router = Router();
 
@@ -97,6 +97,7 @@ router.get('/health', async (_req, res) => {
     db: dbHealthy ? 'up' : 'down',
     redis: redisHealthy ? 'up' : 'down',
     analyzer: analyzerHealthy ? 'up' : 'down',
+    analyzerWakeDetails: getWakeLogs(),
     timestamp: new Date().toISOString(),
   });
 });

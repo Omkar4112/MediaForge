@@ -2,6 +2,14 @@ jest.mock('../src/services/image.service');
 jest.mock('../src/queues/imageProcessing.queue');
 jest.mock('../src/services/analyzerClient.service', () => ({
   checkAnalyzerHealthDirect: jest.fn().mockResolvedValue(true),
+  getWakeLogs: jest.fn().mockReturnValue({
+    baseUrl: 'http://mock-analyzer',
+    backgroundWakeRunning: false,
+    cacheResult: true,
+    cacheExpiry: null,
+    timestamp: new Date().toISOString(),
+    logs: [],
+  }),
 }));
 jest.mock('../src/config/db', () => ({
   pool: { query: jest.fn().mockResolvedValue({ rows: [] }) },

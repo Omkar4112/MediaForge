@@ -46,49 +46,100 @@ const client = axios.create({
 //   4. Subsequent frontend polls instantly see the fresh positive cache.
 //   5. Only one background loop runs at a time (singleton guard).
 
+export interface WakeLogEntry {
+  timestamp: string;
+  message: string;
+  error?: any;
+}
+
 let _analyzerCacheResult: boolean | null = null;
 let _analyzerCacheExpiry = 0;
 let _analyzerInflight: Promise<boolean> | null = null;
 let _backgroundWakeRunning = false;
+const wakeLogs: WakeLogEntry[] = [];
 
 const ANALYZER_CACHE_TTL_OK_MS = 30_000;   // cache "up" for 30s
 const ANALYZER_CACHE_TTL_DOWN_MS = 4_000;   // cache "down" for 4s (re-check fast)
+
+export function addWakeLog(message: string, error?: any): void {
+  const entry: WakeLogEntry = {
+    timestamp: new Date().toISOString(),
+    message,
+    error: error ? {
+      message: error.message,
+      code: error.code,
+      status: error.response?.status,
+      data: error.response?.data,
+      headers: error.response?.headers,
+    } : undefined,
+  };
+  wakeLogs.push(entry);
+  if (wakeLogs.length > 50) {
+    wakeLogs.shift();
+  }
+  if (error) {
+    logger.warn(message, { error: error.message, code: error.code });
+  } else {
+    logger.info(message);
+  }
+}
+
+export function getWakeLogs(): any {
+  return {
+    baseUrl: env.analyzer.baseUrl,
+    backgroundWakeRunning: _backgroundWakeRunning,
+    cacheResult: _analyzerCacheResult,
+    cacheExpiry: _analyzerCacheExpiry ? new Date(_analyzerCacheExpiry).toISOString() : null,
+    timestamp: new Date().toISOString(),
+    logs: wakeLogs,
+  };
+}
 
 /** Fire-and-forget background loop that pings the analyzer until it wakes. */
 function _startBackgroundWake(): void {
   if (_backgroundWakeRunning) return;       // singleton guard
   _backgroundWakeRunning = true;
 
-  const maxAttempts = 24;                   // 24 × 5s = 120s max
+  const maxAttempts = 30;
   const delayMs = 5_000;
-  const perRequestTimeout = 15_000;         // long enough for Render cold-start proxy
+  const perRequestTimeout = 15_000;         // 15s timeout per request
 
-  logger.info('[AnalyzerWake] Background wake-up loop started', {
-    analyzerUrl: env.analyzer.baseUrl,
-    maxAttempts,
-  });
+  addWakeLog(`BACKGROUND ANALYZER WAKE LOOP STARTED. Target: ${env.analyzer.baseUrl}, maxAttempts: ${maxAttempts}`);
 
   (async () => {
     for (let attempt = 1; attempt <= maxAttempts; attempt++) {
       try {
-        logger.info(`[AnalyzerWake] Attempt ${attempt}/${maxAttempts}: GET ${env.analyzer.baseUrl}/health`);
+        // Render sometimes wakes up more reliably when the root path '/' is hit,
+        // or it might return 404/200. We hit '/' to trigger Render's wake-up logic,
+        // and hit '/health' to confirm the application state.
+        addWakeLog(`[AnalyzerWake] Attempt ${attempt}/${maxAttempts} - Starting GET ${env.analyzer.baseUrl}/`);
+        try {
+          const rootResponse = await client.get('/', {
+            timeout: perRequestTimeout,
+          });
+          addWakeLog(`[AnalyzerWake] Attempt ${attempt}/${maxAttempts} - Root GET response status: ${rootResponse.status}`);
+        } catch (rootErr: any) {
+          addWakeLog(`[AnalyzerWake] Attempt ${attempt}/${maxAttempts} - Root GET failed (expected if 404, but wakes Render): status=${rootErr.response?.status ?? 'N/A'}, code=${rootErr.code ?? 'N/A'}`);
+        }
+
+        // Now verify real health
+        addWakeLog(`[AnalyzerWake] Attempt ${attempt}/${maxAttempts} - Starting GET ${env.analyzer.baseUrl}/health`);
         const response = await client.get<{ status: string }>('/health', {
           timeout: perRequestTimeout,
         });
+
         const ok = response.status === 200 && response.data?.status === 'ok';
-        logger.info(`[AnalyzerWake] Response: status=${response.status}, body=${JSON.stringify(response.data)}, ok=${ok}`);
+        addWakeLog(`[AnalyzerWake] Attempt ${attempt}/${maxAttempts} - Health GET response: status=${response.status}, body=${JSON.stringify(response.data)}, ok=${ok}`);
 
         if (ok) {
-          logger.info(`[AnalyzerWake] Analyzer became ready on attempt ${attempt}`);
+          addWakeLog(`[AnalyzerWake] Analyzer became ready on attempt ${attempt}`);
           _analyzerCacheResult = true;
           _analyzerCacheExpiry = Date.now() + ANALYZER_CACHE_TTL_OK_MS;
           _backgroundWakeRunning = false;
           return;
         }
       } catch (err: any) {
-        const status = err.response?.status ?? 'N/A';
-        const code = err.code ?? 'N/A';
-        logger.info(`[AnalyzerWake] Attempt ${attempt}/${maxAttempts} failed: status=${status}, code=${code}, msg=${err.message}`);
+        addWakeLog(`[AnalyzerWake] Attempt ${attempt}/${maxAttempts} - Health GET failed`, err);
       }
 
       if (attempt < maxAttempts) {
@@ -96,10 +147,10 @@ function _startBackgroundWake(): void {
       }
     }
 
-    logger.warn('[AnalyzerWake] Background wake-up loop exhausted all attempts. Analyzer did not become ready.');
+    addWakeLog('[AnalyzerWake] BACKGROUND ANALYZER WAKE LOOP EXHAUSTED ALL ATTEMPTS. Analyzer did not become ready.');
     _backgroundWakeRunning = false;
   })().catch((err) => {
-    logger.error('[AnalyzerWake] Unexpected error in background wake loop', { error: err.message });
+    addWakeLog('[AnalyzerWake] BACKGROUND ANALYZER WAKE LOOP UNEXPECTED ERROR', err);
     _backgroundWakeRunning = false;
   });
 }
@@ -109,24 +160,26 @@ export async function checkAnalyzerHealthDirect(): Promise<boolean> {
 
   // Return cached result if fresh
   if (_analyzerCacheResult !== null && now < _analyzerCacheExpiry) {
-    // If cached as DOWN, ensure the background wake loop is running
     if (!_analyzerCacheResult && !_backgroundWakeRunning) {
+      addWakeLog('[HealthCheck] Cached result is DOWN, background loop is not running. Starting background loop.');
       _startBackgroundWake();
     }
     return _analyzerCacheResult;
   }
 
-  // Cache is stale — do one quick probe (coalesced for concurrent callers)
+  // Cache is stale
   if (_analyzerInflight) {
     return _analyzerInflight;
   }
 
   _analyzerInflight = (async () => {
     try {
+      addWakeLog(`[HealthCheck] Cache stale, sending quick health probe to ${env.analyzer.baseUrl}/health`);
       const response = await client.get<{ status: string }>('/health', {
         timeout: 5000,
       });
       const healthy = response.status === 200 && response.data?.status === 'ok';
+      addWakeLog(`[HealthCheck] Quick health probe result: status=${response.status}, healthy=${healthy}`);
       _analyzerCacheResult = healthy;
       _analyzerCacheExpiry = Date.now() + (healthy ? ANALYZER_CACHE_TTL_OK_MS : ANALYZER_CACHE_TTL_DOWN_MS);
 
@@ -134,7 +187,8 @@ export async function checkAnalyzerHealthDirect(): Promise<boolean> {
         _startBackgroundWake();
       }
       return healthy;
-    } catch (err) {
+    } catch (err: any) {
+      addWakeLog('[HealthCheck] Quick health probe failed', err);
       _analyzerCacheResult = false;
       _analyzerCacheExpiry = Date.now() + ANALYZER_CACHE_TTL_DOWN_MS;
       _startBackgroundWake();
@@ -153,6 +207,7 @@ export function _resetAnalyzerCacheForTesting(): void {
   _analyzerCacheExpiry = 0;
   _analyzerInflight = null;
   _backgroundWakeRunning = false;
+  wakeLogs.length = 0;
 }
 
 export async function wakeAnalyzer(): Promise<void> {
