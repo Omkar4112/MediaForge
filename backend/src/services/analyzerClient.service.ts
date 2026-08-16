@@ -29,31 +29,94 @@ const client = axios.create({
   timeout: env.analyzer.timeoutMs,
 });
 
-// --- Cached / throttled analyzer health check ---
-// The backend /health endpoint is polled every ~2s by the frontend.
-// Without throttling, each poll hits the analyzer, flooding it during
-// cold-start and triggering HTTP 429 from Render's rate-limiter.
+// --- Cached analyzer health + background wake-up ---
 //
-// Cache strategy:
-//   - positive result ("ok") cached for 30s
-//   - negative result (down/error) cached for 10s (allows reasonably fast re-probe)
-//   - concurrent requests coalesce onto a single in-flight check
+// Problem to solve:
+//   The frontend polls GET /health every ~2s.  Each poll must return quickly.
+//   But during a Render cold-start the analyzer takes 30-120s to boot.
+//   A single short-timeout probe per poll will always time out and the
+//   frontend's 90s window expires before the analyzer is ever seen "up".
+//
+// Solution:
+//   1. checkAnalyzerHealthDirect() always returns IMMEDIATELY from a cache.
+//   2. When the cache is stale or negative, we fire ONE background wake-up
+//      loop that keeps pinging the analyzer every 5s (15s timeout each)
+//      until it responds 200 {"status":"ok"}.
+//   3. The background loop updates the cache the moment the analyzer is up.
+//   4. Subsequent frontend polls instantly see the fresh positive cache.
+//   5. Only one background loop runs at a time (singleton guard).
+
 let _analyzerCacheResult: boolean | null = null;
 let _analyzerCacheExpiry = 0;
 let _analyzerInflight: Promise<boolean> | null = null;
+let _backgroundWakeRunning = false;
 
-const ANALYZER_CACHE_TTL_OK_MS = 30_000;   // 30s when healthy
-const ANALYZER_CACHE_TTL_DOWN_MS = 10_000;  // 10s when unhealthy
+const ANALYZER_CACHE_TTL_OK_MS = 30_000;   // cache "up" for 30s
+const ANALYZER_CACHE_TTL_DOWN_MS = 4_000;   // cache "down" for 4s (re-check fast)
+
+/** Fire-and-forget background loop that pings the analyzer until it wakes. */
+function _startBackgroundWake(): void {
+  if (_backgroundWakeRunning) return;       // singleton guard
+  _backgroundWakeRunning = true;
+
+  const maxAttempts = 24;                   // 24 × 5s = 120s max
+  const delayMs = 5_000;
+  const perRequestTimeout = 15_000;         // long enough for Render cold-start proxy
+
+  logger.info('[AnalyzerWake] Background wake-up loop started', {
+    analyzerUrl: env.analyzer.baseUrl,
+    maxAttempts,
+  });
+
+  (async () => {
+    for (let attempt = 1; attempt <= maxAttempts; attempt++) {
+      try {
+        logger.info(`[AnalyzerWake] Attempt ${attempt}/${maxAttempts}: GET ${env.analyzer.baseUrl}/health`);
+        const response = await client.get<{ status: string }>('/health', {
+          timeout: perRequestTimeout,
+        });
+        const ok = response.status === 200 && response.data?.status === 'ok';
+        logger.info(`[AnalyzerWake] Response: status=${response.status}, body=${JSON.stringify(response.data)}, ok=${ok}`);
+
+        if (ok) {
+          logger.info(`[AnalyzerWake] Analyzer became ready on attempt ${attempt}`);
+          _analyzerCacheResult = true;
+          _analyzerCacheExpiry = Date.now() + ANALYZER_CACHE_TTL_OK_MS;
+          _backgroundWakeRunning = false;
+          return;
+        }
+      } catch (err: any) {
+        const status = err.response?.status ?? 'N/A';
+        const code = err.code ?? 'N/A';
+        logger.info(`[AnalyzerWake] Attempt ${attempt}/${maxAttempts} failed: status=${status}, code=${code}, msg=${err.message}`);
+      }
+
+      if (attempt < maxAttempts) {
+        await new Promise((resolve) => setTimeout(resolve, delayMs));
+      }
+    }
+
+    logger.warn('[AnalyzerWake] Background wake-up loop exhausted all attempts. Analyzer did not become ready.');
+    _backgroundWakeRunning = false;
+  })().catch((err) => {
+    logger.error('[AnalyzerWake] Unexpected error in background wake loop', { error: err.message });
+    _backgroundWakeRunning = false;
+  });
+}
 
 export async function checkAnalyzerHealthDirect(): Promise<boolean> {
   const now = Date.now();
 
   // Return cached result if fresh
   if (_analyzerCacheResult !== null && now < _analyzerCacheExpiry) {
+    // If cached as DOWN, ensure the background wake loop is running
+    if (!_analyzerCacheResult && !_backgroundWakeRunning) {
+      _startBackgroundWake();
+    }
     return _analyzerCacheResult;
   }
 
-  // Coalesce concurrent callers onto a single in-flight request
+  // Cache is stale — do one quick probe (coalesced for concurrent callers)
   if (_analyzerInflight) {
     return _analyzerInflight;
   }
@@ -66,10 +129,15 @@ export async function checkAnalyzerHealthDirect(): Promise<boolean> {
       const healthy = response.status === 200 && response.data?.status === 'ok';
       _analyzerCacheResult = healthy;
       _analyzerCacheExpiry = Date.now() + (healthy ? ANALYZER_CACHE_TTL_OK_MS : ANALYZER_CACHE_TTL_DOWN_MS);
+
+      if (!healthy) {
+        _startBackgroundWake();
+      }
       return healthy;
     } catch (err) {
       _analyzerCacheResult = false;
       _analyzerCacheExpiry = Date.now() + ANALYZER_CACHE_TTL_DOWN_MS;
+      _startBackgroundWake();
       return false;
     } finally {
       _analyzerInflight = null;
@@ -84,6 +152,7 @@ export function _resetAnalyzerCacheForTesting(): void {
   _analyzerCacheResult = null;
   _analyzerCacheExpiry = 0;
   _analyzerInflight = null;
+  _backgroundWakeRunning = false;
 }
 
 export async function wakeAnalyzer(): Promise<void> {
